@@ -1,0 +1,25 @@
+{
+    "python.analysis.autoImportCompletions": true,
+    "python.analysis.typeCheckingMode": "off",
+    "pylint.args": [
+        "--disable=W0311",  // Bad indentation
+        "--disable=C0103",  // Invalid name
+        "--disable=C0114",  // module docstring
+        "--disable=C0115",  // class docstring
+        "--disable=C0116",  // func docstring
+        "--disable=C0200",  // consider using enumerate not range len
+        "--disable=C0201",  // consider-iterating-dictionary: consider iterating the dictionary directly instead of calling .keys()
+        "--disable=C0302",  // too-many-lines in module
+        "--disable=C0303",  // Whitespace
+        "--disable=C0415",  // import outside top
+        "--disable=R0913",  // too-many-arguments
+        "--disable=W1203",  // logging-fstring-interpolation: Use lazy % formatting in logging functions
+        "--disable=W1309",  // f-string-without-interpolation: Using an f-string that does not have any interpolated variables
+        "--max-line-length=120",
+        "--generated-members=numpy.* ,torch.* ,cv2.* , cv.*",
+    ],
+    "autopep8.args": [
+        "--max-line-length=120"
+    ],
+    "ruff.lineLength": 120
+}
