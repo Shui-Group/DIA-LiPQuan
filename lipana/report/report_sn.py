@@ -5,7 +5,7 @@ from typing import Optional, Sequence, Union
 import polars as pl
 
 from ..annotations import annotate_common_info
-from ..base import ExperimentSetting, cm
+from ..base import ExperimentLayout, cm
 from ..fasta import ParsedFasta
 from ..utils import resume_file, write_df_to_parquet_or_tsv
 from .report import SearchReport
@@ -26,19 +26,26 @@ spectronaut_report_loading_filter = {
     ),
 }
 
+mod_to_unimod_map = {
+    "[Acetyl (Protein N-term)]": "(UniMod:1)",
+    "[Carbamidomethyl (C)]": "(UniMod:4)",
+    "[Oxidation (M)]": "(UniMod:35)",
+}
+
 
 class SpectronautReport(SearchReport):
     @classmethod
     def load_search_report(
         cls,
         path: Union[str, Path],
-        exp_setting: ExperimentSetting,
+        exp_layout: ExperimentLayout,
         parsed_fasta: ParsedFasta,
         do_species_annotation: bool = False,
         pre_annotation_filter: Optional[pl.Expr] = spectronaut_report_loading_filter["Basic"],
         post_annotation_filter: Optional[pl.Expr] = None,
         restricted_cut_sites: Sequence[str] = ("K", "R"),
         expand_to_cut_site_level: bool = True,
+        modification_map: Optional[dict[str, str]] = mod_to_unimod_map,
         resume: Union[bool, str, Path] = True,
         write_processed_report: bool = True,
         processed_report_filename_suffix: str = "-processed.parquet",
@@ -47,38 +54,33 @@ class SpectronautReport(SearchReport):
     ) -> "SpectronautReport":
         df = load_spectronaut_search_report(
             path=path,
-            exp_setting=exp_setting,
+            exp_layout=exp_layout,
             parsed_fasta=parsed_fasta,
             do_species_annotation=do_species_annotation,
             pre_annotation_filter=pre_annotation_filter,
             post_annotation_filter=post_annotation_filter,
             restricted_cut_sites=restricted_cut_sites,
             expand_to_cut_site_level=expand_to_cut_site_level,
+            modification_map=modification_map,
             resume=resume,
             write_processed_report=write_processed_report,
             processed_report_filename_suffix=processed_report_filename_suffix,
             batch_size=batch_size,
             n_jobs=n_jobs,
         )
-        return cls(df=df, exp_setting=exp_setting, workspace=Path(path).parent)
-
-
-mod_to_unimod_map = {
-    "[Acetyl (Protein N-term)]": "(UniMod:1)",
-    "[Carbamidomethyl (C)]": "(UniMod:4)",
-    "[Oxidation (M)]": "(UniMod:35)",
-}
+        return cls(df=df, exp_layout=exp_layout, workspace=Path(path).parent)
 
 
 def load_spectronaut_search_report(
     path: Union[str, Path],
-    exp_setting: ExperimentSetting,
+    exp_layout: ExperimentLayout,
     parsed_fasta: ParsedFasta,
     do_species_annotation: bool = False,
     pre_annotation_filter: Optional[pl.Expr] = spectronaut_report_loading_filter["Basic"],
     post_annotation_filter: Optional[pl.Expr] = None,
     restricted_cut_sites: Sequence[str] = ("K", "R"),
     expand_to_cut_site_level: bool = True,
+    modification_map: Optional[dict[str, str]] = mod_to_unimod_map,
     resume: Union[bool, str, Path] = True,
     write_processed_report: bool = True,
     processed_report_filename_suffix: str = "-processed.parquet",
@@ -125,11 +127,12 @@ def load_spectronaut_search_report(
         .with_columns(
             pl.col(cm.precursor_quantity_ms2).alias(cm.precursor_quantity),
         )
-        .with_columns(
-            pl.col(cm.modified_peptide).str.replace_many(mod_to_unimod_map).str.strip_prefix("_").str.strip_suffix("_")
-        )
     )
-    df = df.join(exp_setting.exp_df, on=cm.run, how="left", coalesce=True)
+    if modification_map is not None:
+        df = df.with_columns(
+            pl.col(cm.modified_peptide).str.replace_many(modification_map).str.strip_prefix("_").str.strip_suffix("_")
+        )
+    df = df.join(exp_layout.exp_df, on=cm.run, how="left", coalesce=True)
 
     df = annotate_common_info(
         df,

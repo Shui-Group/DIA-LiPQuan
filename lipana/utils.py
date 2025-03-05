@@ -274,6 +274,16 @@ class DFFilterConfig(AbstractDFManiConfig):
     condition: Optional[pl.Expr] = None
 
 
+@dataclass
+class DFConcatConfig(AbstractDFManiConfig):
+    how: Literal["vertical", "horizontal"] = "vertical"
+
+
+@dataclass
+class DFColRenameConfig(AbstractDFManiConfig):
+    rename_dict: Mapping[str, str]
+
+
 def do_df_mani(
     df: pl.DataFrame,
     config: Optional[Union[AbstractDFManiConfig, Sequence[AbstractDFManiConfig]]] = None,
@@ -290,6 +300,10 @@ def do_df_mani(
         elif isinstance(conf, DFFilterConfig):
             if conf.condition is not None:
                 df = df.filter(conf.condition)
+        elif isinstance(conf, DFColRenameConfig):
+            df = df.rename(conf.rename_dict)
+        elif isinstance(conf, DFConcatConfig):
+            df = pl.concat(df, how=conf.how)
         else:
             raise ValueError(f"Unexpected DataFrame manipulation config: {conf}")
     return df

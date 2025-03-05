@@ -1,7 +1,7 @@
 import itertools
 import logging
 from dataclasses import dataclass
-from typing import Literal, Optional, Sequence, Union
+from typing import Any, Callable, Iterable, Literal, Optional, Sequence, Union
 
 import numpy as np
 import polars as pl
@@ -12,10 +12,10 @@ from ..utils import (
     do_df_mani,
     gather_value_or_all,
 )
+from .stats_base import AbstractDescConfig, _T_CompareScope
 
 __all__ = [
     "agg_vec",
-    "AbstractDescConfig",
     "calc_ratio",
     "calc_ratio_batch",
     "calc_ratio_on_df",
@@ -33,7 +33,10 @@ logger = logging.getLogger("lipana")
 def agg_vec(
     vec: np.array,
     method: Literal["mean", "median", "absmax", "absmin", "interquartile_mean"],
-):
+) -> float:
+    """
+    Aggregate a vector of values by different methods.
+    """
     match method:
         case "mean":
             return np.mean(vec)
@@ -47,11 +50,6 @@ def agg_vec(
             return np.mean(np.sort(vec)[int(np.floor(vec.size / 4)) : int(np.ceil(vec.size / 4 * 3))])
 
 
-@dataclass
-class AbstractDescConfig:
-    pass
-
-
 def calc_ratio(
     arr1: np.ndarray,
     arr2: np.ndarray,
@@ -59,10 +57,27 @@ def calc_ratio(
     temp_reverse_log_scale: Optional[int] = None,
     div_method: Literal["agg_and_divide", "divide_and_agg"] = "divide_and_agg",
     agg_method: Literal["mean", "median", "absmax", "absmin", "interquartile_mean"] = "interquartile_mean",
-):
+) -> float:
     """
-    Do aggregation on log-scaled values might result in results with larger variance.
-    Use `temp_reverse_log_scale` to temporarily reverse the log scale for ratio calculation (the result will be reverted to original log scale again).
+    Calculate the ratio of two arrays.
+    To do aggregation on the original scale, instead of log-scaled values, use `temp_reverse_log_scale` to temporarily reverse the log scale for ratio calculation (the result will be reverted to original log scale again).
+
+    Parameters
+    ----------
+    arr1 : np.ndarray
+        The numerator array.
+    arr2 : np.ndarray
+        The denominator array.
+    is_log : bool, optional
+        Whether the arrays are log-scaled, by default True.
+    temp_reverse_log_scale : Optional[int], optional
+        The base of the log scale, by default None.
+        When set, will temporarily reverse the log scale for ratio calculation (the result will be reverted to original log scale again).
+    div_method : Literal[&quot;agg_and_divide&quot;, &quot;divide_and_agg&quot;], optional
+        - "agg_and_divide": aggregate the two arrays and then divide
+        - "divide_and_agg": divide the two arrays (combination of elements in two arrays) and then aggregate
+    agg_method : Literal[&quot;mean&quot;, &quot;median&quot;, &quot;absmax&quot;, &quot;absmin&quot;, &quot;interquartile_mean&quot;], optional
+        The method to aggregate the two arrays, by default "interquartile_mean".
     """
     if all(np.isnan(arr1)) or all(np.isnan(arr2)):
         return np.nan
@@ -104,7 +119,13 @@ def calc_ratio_batch(
     temp_reverse_log_scale: Optional[int] = None,
     div_method: Literal["agg_and_divide", "divide_and_agg"] = "divide_and_agg",
     agg_method: Literal["mean", "median", "absmax", "absmin", "interquartile_mean"] = "interquartile_mean",
-):
+) -> np.ndarray:
+    """
+    Calculate the ratio of two arrays in batch.
+    If only one array is provided, `arr` should have shape (n, 2, m) with n as the number of samples, 2 as the numerator and denominator, and m as the number of replicates.
+    If two arrays are provided, they should have the same shape (n, m).
+    See `calc_ratio` for other parameters.
+    """
     if arr2 is None:
         if (len(arr.shape) != 3) or (arr.shape[1] != 2):
             raise ValueError(f"Expect a three-dim array with shape (n, 2, m) to calc ratios. Got {arr.shape}")
@@ -155,9 +176,9 @@ def calc_ratio_on_df(
         The base of the log scale, by default None.
         When set, will temporarily reverse the log scale for ratio calculation (the result will be reverted to original log scale again).
     div_method : Literal[&quot;agg_and_divide&quot;, &quot;divide_and_agg&quot;], optional
-        see `calc_ratio_batch` for details, by default "divide_and_agg"
+        see `calc_ratio` for details, by default "divide_and_agg"
     agg_method : Literal[&quot;mean&quot;, &quot;median&quot;, &quot;absmax&quot;, &quot;absmin&quot;, &quot;interquartile_mean&quot;], optional
-        see `calc_ratio_batch` for details, by default "interquartile_mean"
+        see `calc_ratio` for details, by default "interquartile_mean"
     new_colname_pattern : str, optional
         The pattern of the column names that will be attached to quantification dataframe, by default "ratio_{cond1}_to_{cond2}".
 
@@ -209,17 +230,28 @@ def calc_ratio_on_df(
 
 @dataclass
 class RatioCalcConfig(AbstractDescConfig):
-    cond_to_cols_map: dict[str, Sequence[str]]
+    """
+    Configuration for calculating ratios.
+    When passing this config to `do_desc_summary_on_df`, will call `calc_ratio_on_df` to calculate ratios.
+    """
+
+    cond_to_cols_map: Optional[dict[str, Sequence[str]]] = None
     base_cond: _T_InputOrAll = None
     cond_pairs: Union[tuple[str, str], Sequence[tuple[str, str]]] = None
+
     is_log: bool = True
     temp_reverse_log_scale: Optional[int] = None
     div_method: Literal["agg_and_divide", "divide_and_agg"] = "divide_and_agg"
     agg_method: Literal["mean", "median", "absmax", "absmin", "interquartile_mean"] = "interquartile_mean"
     new_colname_pattern: str = "ratio_{cond1}_to_{cond2}"
 
+    _compare_scope: _T_CompareScope = "all"
+
 
 def iqr(value: np.ndarray):
+    """
+    Calculate the interquartile range (IQR) of a value array.
+    """
     return np.percentile(value, 75) - np.percentile(value, 25)
 
 
@@ -232,8 +264,10 @@ def cv(
     keep_na: bool = False,
     # round: Optional[int] = None,
     # return_iqr: bool = False,
-):
+) -> np.ndarray:
     """
+    Calculate the coefficient of variation (cv) for each sample in a value array.
+
     Parameters
     ----------
     value_array : np.ndarray
@@ -306,7 +340,7 @@ def calc_cv_on_df(
         One entry with quantities less than this number in a certain condition will have a cv of NaN.
     temp_reverse_log_scale: Optional[int], optional
         To temporarily reverse the log scale of the quantity values for cv calculation, by default 2.
-        If None, will use quantity values as they in the current dataframe.
+        If None, will use quantity values as they are in the current dataframe.
     new_colname_pattern : str, optional
         The pattern of the column names that will be attached to quantification dataframe, by default "{cond}_cv_{min_reps}reps".
         Can set to something like "{cond}-CV" to omit the annotation of minimum replicates.
@@ -340,24 +374,61 @@ def calc_cv_on_df(
 
 @dataclass
 class CVCalcConfig(AbstractDescConfig):
-    cond_to_cols_map: dict[str, Sequence[str]]
+    """
+    Configuration for calculating cv.
+    When passing this config to `do_desc_summary_on_df`, will call `calc_cv_on_df` to calculate cv.
+    """
+
+    cond_to_cols_map: Optional[dict[str, Sequence[str]]] = None
     cond: _T_InputOrAll = "all"
+
     min_reps: int = 3
     temp_reverse_log_scale: Optional[int] = 2
     new_colname_pattern: str = "{cond}_cv_{min_reps}reps"
 
+    _compare_scope: _T_CompareScope = "all"
+
+
+_T_DescConfig = Union[
+    AbstractDescConfig,
+    AbstractDFManiConfig,
+    Callable,
+]
+
 
 def do_desc_summary_on_df(
     df: pl.DataFrame,
-    config: Union[AbstractDescConfig, Sequence[Union[AbstractDescConfig, AbstractDFManiConfig]]],
-):
-    if isinstance(config, AbstractDescConfig):
+    config: Union[_T_DescConfig, Sequence[_T_DescConfig]],
+) -> pl.DataFrame:
+    """
+    Perform descriptive statistics on a dataframe.
+    """
+    if not isinstance(config, Iterable):
         config = (config,)
     for conf in config:
-        if isinstance(conf, RatioCalcConfig):
-            df = calc_ratio_on_df(df, **conf.__dict__)
+        if callable(conf):
+            df = conf(df)
+        elif isinstance(conf, RatioCalcConfig):
+            df = calc_ratio_on_df(
+                df,
+                cond_to_cols_map=conf.cond_to_cols_map,
+                base_cond=conf.base_cond,
+                cond_pairs=conf.cond_pairs,
+                is_log=conf.is_log,
+                temp_reverse_log_scale=conf.temp_reverse_log_scale,
+                div_method=conf.div_method,
+                agg_method=conf.agg_method,
+                new_colname_pattern=conf.new_colname_pattern,
+            )
         elif isinstance(conf, CVCalcConfig):
-            df = calc_cv_on_df(df, **conf.__dict__)
+            df = calc_cv_on_df(
+                df,
+                cond_to_cols_map=conf.cond_to_cols_map,
+                cond=conf.cond,
+                min_reps=conf.min_reps,
+                temp_reverse_log_scale=conf.temp_reverse_log_scale,
+                new_colname_pattern=conf.new_colname_pattern,
+            )
         elif isinstance(conf, AbstractDFManiConfig):
             df = do_df_mani(df, conf)
         else:

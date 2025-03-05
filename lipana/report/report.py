@@ -19,7 +19,7 @@ from ..base import (
     AbstractQuantificationReport,
     AbstractSearchReport,
     AbstractStatsReport,
-    ExperimentSetting,
+    ExperimentLayout,
     _T_EntryLevels,
     cm,
 )
@@ -50,7 +50,7 @@ class SearchReport(AbstractSearchReport):
     def __init__(
         self,
         df: pl.DataFrame,
-        exp_setting: ExperimentSetting,
+        exp_layout: ExperimentLayout,
         workspace: Optional[Union[str, Path]] = None,
     ):
         """
@@ -66,7 +66,7 @@ class SearchReport(AbstractSearchReport):
         like `load_diann_search_report` in `report_diann.py`, and the returned dataframe can be used as the input for this class.
         """
         self.df = df
-        self.exp_setting = exp_setting
+        self.exp_layout = exp_layout
         self.workspace = workspace
 
         self._quant_input: dict[Union[_T_EntryLevels, tuple[_T_EntryLevels, str]], pl.DataFrame] = {}
@@ -280,12 +280,13 @@ class SearchReport(AbstractSearchReport):
                 raise ValueError("When quant_data is a dataframe, entry_name should be defined")
             quant_data = EntryQuantificationReport(
                 quant_data,
-                exp_setting=self.exp_setting,
+                exp_layout=self.exp_layout,
                 entry_level=entry_level,
                 quant_method=quant_method,
+                main_report=self,
             )
         elif isinstance(quant_data, EntryQuantificationReport):
-            pass
+            quant_data._main_report = self
         else:
             raise ValueError(f"Unsupported quant_data type: {type(quant_data)}")
         self.quant_data[(quant_data.entry_level, quant_data.quant_method)] = quant_data
@@ -446,8 +447,8 @@ class SearchReport(AbstractSearchReport):
         if (cond is None) and (run is None):
             return df.n_unique(entry_name)
 
-        cond = gather_value_or_all(cond, list(self.exp_setting.condition_to_runs_map.keys()))
-        run = gather_value_or_all(run, list(self.exp_setting.run_to_condition_map.keys()))
+        cond = gather_value_or_all(cond, list(self.exp_layout.condition_to_runs_map.keys()))
+        run = gather_value_or_all(run, list(self.exp_layout.run_to_condition_map.keys()))
         if (len(cond) == 0) and (len(run) == 0):
             return {}
 
@@ -458,7 +459,7 @@ class SearchReport(AbstractSearchReport):
         result = {}
         for c in cond:
             result[c] = (
-                df.filter(pl.col(run_col).is_in(self.exp_setting.condition_to_runs_map[c]))
+                df.filter(pl.col(run_col).is_in(self.exp_layout.condition_to_runs_map[c]))
                 .filter(pl.col(run_col).len().over(entry_name).ge(min_reps))
                 .n_unique(entry_name)
             )
@@ -508,7 +509,7 @@ class SearchReport(AbstractSearchReport):
 
         if save_type == "individual":
             folder_or_path.mkdir(exist_ok=True)
-            self.exp_setting.dump(folder_or_path.joinpath("experiment_setting.tsv"))
+            self.exp_layout.dump(folder_or_path.joinpath("experiment_setting.tsv"))
             self.df.write_parquet(folder_or_path.joinpath("search_report.parquet"))
             for k, q in self._quant_input.items():
                 pass
@@ -543,16 +544,16 @@ class SearchReport(AbstractSearchReport):
         """
         if load_type == "individual":
             folder_or_path = Path(folder_or_path).resolve()
-            exp_setting = ExperimentSetting.from_file(folder_or_path.joinpath("experiment_setting.tsv"))
+            exp_layout = ExperimentLayout.from_file(folder_or_path.joinpath("experiment_setting.tsv"))
             df = pl.read_parquet(folder_or_path.joinpath("search_report.parquet"))
 
-            obj = cls(df, exp_setting, workspace=folder_or_path.parent)
+            obj = cls(df, exp_layout, workspace=folder_or_path.parent)
 
             for f in folder_or_path.iterdir():
                 if f.name.startswith("quant_input!!"):
                     pass
                 elif f.name.startswith("quant!!"):
-                    obj.attach_quant_data(EntryQuantificationReport.load(f, exp_setting, main_report=obj))
+                    obj.attach_quant_data(EntryQuantificationReport.load(f, exp_layout, main_report=obj))
                 elif f.name.startswith("stats!!"):
                     pass
                 else:
@@ -574,7 +575,7 @@ class EntryQuantificationReport(AbstractQuantificationReport):
     def __init__(
         self,
         df: pl.DataFrame,
-        exp_setting: ExperimentSetting,
+        exp_layout: ExperimentLayout,
         entry_level: _T_EntryLevels,
         quant_method: Optional[str] = None,
         main_report: Optional[SearchReport] = None,
@@ -587,7 +588,7 @@ class EntryQuantificationReport(AbstractQuantificationReport):
         df : pl.DataFrame
             A quantification dataframe which is in wide-format.
             Use `from_long_report` to init this class by giving a long-format report as the input.
-        exp_setting : ExperimentSetting
+        exp_layout : ExperimentLayout
             The experiment setting object that defines the mapping between runs and conditions.
         entry_level : _T_EntryLevels
             The entry level of this quantification report, and should be the column name of the entry if the entry column exists in the dataframe.
@@ -596,10 +597,10 @@ class EntryQuantificationReport(AbstractQuantificationReport):
             This will be set to "NotDefined" if not given.
         """
         self.df = df
-        if exp_setting is None:
-            raise ValueError("ExperimentSetting object should be provided.")
-        self.exp_setting = exp_setting
-        self.cond_to_run_map = exp_setting.condition_to_runs_map
+        if exp_layout is None:
+            raise ValueError("ExperimentLayout object should be provided.")
+        self.exp_layout = exp_layout
+        self.cond_to_run_map = exp_layout.condition_to_runs_map
         self.entry_level = entry_level
         self.quant_method = quant_method if (quant_method is not None) else "NotDefined"
         self.__input_columns = list(self.df.columns)
@@ -609,7 +610,7 @@ class EntryQuantificationReport(AbstractQuantificationReport):
     def from_long_report(
         cls,
         long_report: Union[pl.DataFrame, SearchReport],
-        exp_setting: ExperimentSetting = None,
+        exp_layout: ExperimentLayout = None,
         entry_quant_col: str = "cut_site_quantity",
         entry_col: str = cm.cut_site,
         run_col: str = cm.run,
@@ -620,10 +621,10 @@ class EntryQuantificationReport(AbstractQuantificationReport):
     ) -> "EntryQuantificationReport":
         """
         Construct a quantification report object from a long-format report.
-        When the input is a SearchReport object, the dataframe in the object will be used as the input, and exp_setting can be None.
+        When the input is a SearchReport object, the dataframe in the object will be used as the input, and exp_layout can be None.
         """
         if isinstance(long_report, SearchReport):
-            exp_setting = long_report.exp_setting
+            exp_layout = long_report.exp_layout
             long_report = long_report.df
         return cls(
             convert_long_report_to_wide(
@@ -637,7 +638,7 @@ class EntryQuantificationReport(AbstractQuantificationReport):
                 recollected_annotation_cols=recollected_annotation_cols,
                 strict_recollection=False,
             ),
-            exp_setting=exp_setting,
+            exp_layout=exp_layout,
             entry_level=entry_col,
             quant_method=entry_quant_col,
         )
@@ -718,8 +719,8 @@ class EntryQuantificationReport(AbstractQuantificationReport):
             Whether to include all other columns (exclude all runs and entry col) in result, by default False
 
         """
-        conds = gather_value_or_all(cond, list(self.exp_setting.all_conditions))
-        runs = flatten_nested_list([self.exp_setting.condition_to_runs_map[c] for c in conds])
+        conds = gather_value_or_all(cond, list(self.exp_layout.all_conditions))
+        runs = flatten_nested_list([self.exp_layout.condition_to_runs_map[c] for c in conds])
 
         kept_cols = [self.entry_level] if keep_entry_col else []
         if keep_other_cols:
@@ -733,7 +734,7 @@ class EntryQuantificationReport(AbstractQuantificationReport):
             (
                 self.df.select(kept_cols),
                 pl.DataFrame(
-                    {c: np_agg_func(self.df.select(self.exp_setting.condition_to_runs_map[c]), axis=1) for c in conds}
+                    {c: np_agg_func(self.df.select(self.exp_layout.condition_to_runs_map[c]), axis=1) for c in conds}
                 ),
             ),
             how="horizontal",
@@ -760,7 +761,7 @@ class EntryQuantificationReport(AbstractQuantificationReport):
             Whether to include all other columns (exclude selected runs/conditions and entry col) in result, by default False
         """
 
-        runs = gather_value_or_all(run, list(self.exp_setting.all_runs))
+        runs = gather_value_or_all(run, list(self.exp_layout.all_runs))
 
         kept_cols = [self.entry_level] if keep_entry_col else []
         if keep_other_cols:
@@ -800,7 +801,7 @@ class EntryQuantificationReport(AbstractQuantificationReport):
         """
         self.df = calc_cv_on_df(
             self.df,
-            cond_to_cols_map=self.exp_setting.condition_to_runs_map,
+            cond_to_cols_map=self.exp_layout.condition_to_runs_map,
             cond=cond,
             min_reps=min_reps,
             temp_reverse_log_scale=temp_reverse_log_scale,
@@ -831,7 +832,7 @@ class EntryQuantificationReport(AbstractQuantificationReport):
         cond = gather_value_or_all(cond, list(self.cond_to_run_map.keys()))
         self.df = self.df.with_columns(
             pl.lit(
-                count_df_selected_cols_nonnan(self.df, cols=self.cond_to_run_map[c], count_col=False),
+                count_df_selected_cols_nonnan(self.df, cols=self.cond_to_run_map[c], count_col=None),
                 dtype=pl.Int8,
             ).alias(new_colname_pattern.format(cond=c))
             for c in cond
@@ -921,7 +922,7 @@ class EntryQuantificationReport(AbstractQuantificationReport):
         """
         self.df = calc_ratio_on_df(
             self.df,
-            cond_to_cols_map=self.exp_setting.condition_to_runs_map,
+            cond_to_cols_map=self.exp_layout.condition_to_runs_map,
             base_cond=base_cond,
             cond_pairs=cond_pairs,
             is_log=is_log,
@@ -990,7 +991,7 @@ class EntryQuantificationReport(AbstractQuantificationReport):
     def load(
         cls,
         path: Union[str, Path],
-        exp_setting: ExperimentSetting,
+        exp_layout: ExperimentLayout,
         entry_level: Optional[_T_EntryLevels] = None,
         quant_method: Optional[str] = None,
         main_report: Optional[SearchReport] = None,
@@ -1007,11 +1008,11 @@ class EntryQuantificationReport(AbstractQuantificationReport):
                 raise ValueError(
                     "When `path` does not contain entry level info, `entry_level` should be explicitly defined."
                 )
-        return cls(read_df_from_parquet_or_tsv(path), exp_setting, entry_level, quant_method, main_report)
+        return cls(read_df_from_parquet_or_tsv(path), exp_layout, entry_level, quant_method, main_report)
 
     def copy(self):
         return EntryQuantificationReport(
-            self.df.clone(), self.exp_setting, self.entry_level, self.quant_method, self._main_report
+            self.df.clone(), self.exp_layout, self.entry_level, self.quant_method, self._main_report
         )
 
 

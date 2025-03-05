@@ -1,5 +1,5 @@
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Optional, Union
 
@@ -15,7 +15,8 @@ __all__ = [
     "AbstractSearchReport",
     "AbstractQuantificationReport",
     "AbstractStatsReport",
-    "ExperimentSetting",
+    "ExperimentLayout",
+    "ComparisonDesign",
 ]
 
 logger = logging.getLogger("lipana")
@@ -96,7 +97,7 @@ class AbstractStatsReport:
 
 
 @dataclass
-class ExperimentSetting:
+class ExperimentLayout:
     """
     exp_df should have 3 columns named "run", "condition", and "replicate".
     See `from_df`, `from_file`, and `from_run_to_condition_map` for the initialization of this class.
@@ -178,3 +179,70 @@ class ExperimentSetting:
         path = Path(path).resolve().absolute()
         write_df_to_parquet_or_tsv(self.exp_df, path)
         return path
+
+
+@dataclass
+class ComparisonDesign:
+    exp_layout: ExperimentLayout
+    pairwise_comparisons: list[tuple[str, str]] = field(default_factory=list)
+    # contrast_matrix: Optional[list[list[int]]] = None
+
+    used_conditions: list[str] = field(default_factory=list, init=False)
+
+    def add_pairwise_comparison(
+        self,
+        treatment: Optional[str] = None,
+        control: Optional[str] = None,
+    ) -> "ComparisonDesign":
+        """
+        Add one or more comparison pairs to the comparison design.
+        Set both `treatment` and `control` to add a single comparison pair "treatment" to "control".
+        Set only `treatment` to add all comparisons with `treatment` as the treatment condition.
+        Set only `control` to add all comparisons with `control` as the control condition.
+        Set both `treatment` and `control` to `None` to add all available comparisons.
+
+        Parameters
+        ----------
+        treatment : Optional[str], optional
+            The treatment condition to compare, by default None.
+        control : Optional[str], optional
+            The control condition to compare, by default None.
+        """
+        if treatment is None:
+            treatment = self.exp_layout.all_conditions
+        if control is None:
+            control = self.exp_layout.all_conditions
+        if isinstance(treatment, str):
+            treatment = [treatment]
+        if isinstance(control, str):
+            control = [control]
+        self.pairwise_comparisons.extend((t, c) for t in treatment for c in control)
+        self._update_inner_states()
+        return self
+
+    def delete_pairwise_comparison(
+        self,
+        treatment: Optional[str] = None,
+        control: Optional[str] = None,
+    ) -> "ComparisonDesign":
+        if treatment is None:
+            treatment = self.exp_layout.all_conditions
+        if control is None:
+            control = self.exp_layout.all_conditions
+        if isinstance(treatment, str):
+            treatment = [treatment]
+        if isinstance(control, str):
+            control = [control]
+        self.pairwise_comparisons = [
+            p for p in self.pairwise_comparisons if (p[0] not in treatment) and (p[1] not in control)
+        ]
+        self._update_inner_states()
+        return self
+
+    def _update_inner_states(self):
+        self.used_conditions = list(
+            set(p[0] for p in self.pairwise_comparisons) | set(p[1] for p in self.pairwise_comparisons)
+        )
+
+    def __post_init__(self):
+        self._update_inner_states()

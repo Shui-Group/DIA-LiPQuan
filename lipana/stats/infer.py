@@ -6,23 +6,24 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Callable, Literal, Optional, Sequence, Union
+import itertools
 
 import numpy as np
 import polars as pl
 import scipy.stats
 
 from ..annotations import attach_annotation_from_other_df
-from ..base import AbstractQuantificationReport, ExperimentSetting
+from ..base import AbstractQuantificationReport, ExperimentLayout
+from .stats_base import AbstractHypoTestConfig, AbstractTestAdjustConfig, _T_CompareScope
 from ..utils import AbstractDFManiConfig, do_df_mani, exec_r_script, read_df_from_parquet_or_tsv
 
 __all__ = [
-    "AbstractInferConfig",
     "ttest",
     "ttest_batch",
     "ttest_on_df",
     "TTestConfig",
     "exec_limma",
-    "LimmaConfig",
+    "LimmaPairwiseConfig",
     "scipy_comb_p_with_nan",
     "combine_pvalues_in_group",
     "PvalueCombineConfig",
@@ -36,15 +37,10 @@ __all__ = [
     "scipy_fdr_with_nan",
     "fdr_on_df",
     "FDRConfig",
-    "do_stats_on_df",
+    "do_hypo_test_on_df",
 ]
 
 logger = logging.getLogger("lipana")
-
-
-@dataclass
-class AbstractInferConfig:
-    """Base configuration class for inference tasks."""
 
 
 def ttest(
@@ -125,45 +121,114 @@ def ttest_batch(
     )
 
 
+def _flatten_condition_pairs(
+    condition_pairs: Optional[Union[str, Sequence[Union[str, tuple[str, str]]]]],
+    all_conditions: Optional[Sequence[str]],
+    to_str: bool = False,
+):
+    """
+    condition_pairs : Optional[Union[str, Sequence[Union[str, tuple[str, str]]]]], optional
+        A sequence of condition pairs for the hypothesis test.
+        When `None`, will omit this argument for `do_limma_pair.R` script, which will do hypothesis tests on all possible condition pairs.
+        When str, will be passed to `do_limma_pair.R` script as `condition_pairs`, which will set the provided condition as the control condition.
+        When Sequence, will do join. For example, [A, (A, B), (C, B)] will be "A;;A//B;;C//B", which will be flattened as "B//A;C//A;A//B;C//B".
+
+    """
+    if condition_pairs is None:
+        condition_pairs = list(itertools.combinations(all_conditions, 2))
+    elif isinstance(condition_pairs, str):
+        condition_pairs = []
+        for pair in condition_pairs.split(";;"):
+            if "//" in pair:
+                condition_pairs.append(tuple(pair.split("//")))
+            else:
+                condition_pairs.extend([(pair, cond) for cond in all_conditions if pair != cond])
+    elif isinstance(condition_pairs, Sequence):
+        _condition_pairs = []
+        for pair in condition_pairs:
+            if isinstance(pair, Sequence):
+                if len(pair) != 2:
+                    raise ValueError(f"Invalid condition pair: {pair}")
+                _condition_pairs.append(pair)
+            else:
+                _condition_pairs.extend([(pair, cond) for cond in all_conditions if pair != cond])
+        condition_pairs = _condition_pairs
+    else:
+        raise ValueError(f"Invalid condition pairs: {condition_pairs}")
+
+    condition_pairs = sorted(set(condition_pairs))
+    if to_str:
+        return ";;".join([f"{pair[0]}//{pair[1]}" for pair in condition_pairs])
+    return condition_pairs
+
+
 def ttest_on_df(
     df: pl.DataFrame,
-    exp_runs: Sequence[str],
-    ctrl_runs: Sequence[str],
+    condition_pairs: Optional[Union[str, Sequence[Union[str, tuple[str, str]]]]] = None,
+    exp_layout: Optional[ExperimentLayout] = None,
+    entry_col: Optional[str] = "precursor",
+    recollected_columns: Optional[Union[str, Sequence[str]]] = None,
     equal_var: bool = False,
     one_side_alt_when_full_zero: bool = False,
     min_nonnan_count: int = 3,
-    entry_col: Optional[str] = None,
     t_col: str = "t",
     p_col: str = "pvalue",
-):
+) -> pl.DataFrame:
     """
-    Perform t-test on two groups of runs in a dataframe.
-    If entry_col is None, will return the input dataframe with t and pvalue columns.
-    Otherwise, will return a dataframe with entry_col, t and pvalue columns.
+    Perform t-tests on defined groups of runs in a dataframe.
     """
-    result = pl.from_numpy(
-        ttest_batch(
-            df.select(exp_runs).to_numpy(),
-            df.select(ctrl_runs).to_numpy(),
-            equal_var,
-            one_side_alt_when_full_zero,
-            min_nonnan_count,
-        ),
-        [t_col, p_col],
+    condition_pairs = _flatten_condition_pairs(condition_pairs, exp_layout.all_conditions, to_str=False)
+
+    result = pl.concat(
+        (
+            pl.from_numpy(
+                ttest_batch(
+                    df.select(exp_layout.condition_to_runs_map[condition_pair[0]]).to_numpy(),
+                    df.select(exp_layout.condition_to_runs_map[condition_pair[1]]).to_numpy(),
+                    equal_var,
+                    one_side_alt_when_full_zero,
+                    min_nonnan_count,
+                ),
+                [t_col, p_col],
+            ).with_columns(
+                pl.Series(
+                    name="pair",
+                    values=[f"{condition_pair[0]}_vs_{condition_pair[1]}" for condition_pair in condition_pairs],
+                ),
+                df[entry_col],
+            ),
+        )
+        for condition_pair in condition_pairs
     )
-    if entry_col is None:
-        return df.with_columns(result)
-    return result.with_columns(df[entry_col])
+
+    if recollected_columns is not None:
+        result = attach_annotation_from_other_df(
+            result,
+            other_df=df,
+            annotation_cols=recollected_columns,
+            on=entry_col,
+        )
+
+    return result
 
 
 @dataclass
-class TTestConfig(AbstractInferConfig):
+class TTestConfig(AbstractHypoTestConfig):
+    """
+    Configuration for calling `ttest_on_df` in `do_stats_on_df`.
+    """
+
+    exp_layout: Optional[ExperimentLayout] = None
+    entry_col: Optional[str] = None
+    recollected_columns: Optional[Union[str, Sequence[str]]] = None
+
     equal_var: bool = False
     one_side_alt_when_full_zero: bool = False
     min_nonnan_count: int = 3
-    entry_col: Optional[str] = None
     t_col: str = "t"
     p_col: str = "pvalue"
+
+    _compare_scope: _T_CompareScope = "pairwise"
 
 
 default_limma_output_column_map = {
@@ -176,9 +241,9 @@ default_limma_output_column_map = {
 
 def exec_limma(
     in_data: Union[AbstractQuantificationReport, pl.DataFrame, str, Path],
-    annotation_data: Optional[Union[ExperimentSetting, pl.DataFrame, str, Path]] = None,
+    condition_pairs: Optional[Union[str, Sequence[Union[str, tuple[str, str]]]]] = None,
+    exp_layout: Optional[ExperimentLayout] = None,
     entry_name: Optional[str] = None,
-    condition_pairs: Optional[str] = None,
     output_column_map: Optional[Union[Literal["default"], dict[str, str]]] = "default",
     output_column_map_override: Optional[dict[str, str]] = None,
     recollected_columns: Optional[Union[str, Sequence[str]]] = None,
@@ -206,22 +271,18 @@ def exec_limma(
     ----------
     in_data : Union[AbstractQuantificationReport, pl.DataFrame, str, Path]
         Input data as "AbstractQuantificationReport", polars DataFrame, or path.
-    annotation_data : Optional[Union[ExperimentSetting, pl.DataFrame, str, Path]], optional
-        A annotation data in formats "ExperimentSetting", polars dataframe, str, or path.
-        When `in_data` is "AbstractQuantificationReport", this parameter will be `in_data.exp_setting`.
-        Else, 1. this argument should be a dataframe that has at least two columns "run" and "condition".
-        2. if a path is provided, the file should be a tab-separated file with the required columns.
-        3. a string in format like "run1::cond1;;run2::cond1;;run3::cond2" to specify the condition for each run.
+    exp_layout : Optional[ExperimentLayout], optional
+        `ExperimentLayout` to specify the experiment layout for condition to runs mapping.
+        Only when `in_data` is `AbstractQuantificationReport`, this parameter can be None.
+    condition_pairs : Optional[Union[str, Sequence[Union[str, tuple[str, str]]]]], optional
+        A sequence of condition pairs for the hypothesis test.
+        When `None`, will omit this argument for `do_limma_pair.R` script, which will do hypothesis tests on all possible condition pairs.
+        When str, will be passed to `do_limma_pair.R` script as `condition_pairs`, which will set the provided condition as the control condition.
+        When Sequence, will do join. For example, [A, (A, B), (C, B)] will be "A;;A//B;;C//B", which will be flattened as "B//A;C//A;A//B;C//B".
     entry_name : Optional[str], optional
         An optional string to specify the entry name in the input data, by default None.
         When `in_data` is "AbstractQuantificationReport", this parameter will be `in_data.entry_level`.
         Else, the default value is "Entry", which should be in the dataframe.
-    condition_pairs : Optional[str], optional
-        An optional string to specify required condition pairs, separated by ";;" and can be a mix of the following formats:
-        a. a single condition to be the base condition, like "cond1;;cond2" will be flatten as "cond2//cond1;;cond3//cond1;;cond1//cond2;;cond3//cond2".
-        b. condition pairs separated by "//", like "cond1//cond2;;cond3//cond2".
-        c. if this argument is not provided, will compare all available pairs in the annotation data.
-        (a and b can be mixed, like "cond1//cond3;;cond2" will be flatten as "cond1//cond3;;cond1//cond2;;cond3//cond2")
     output_column_map : Optional[dict[str, str]], optional
         An optional dict to map the output column names to the desired names, like {"ID": "cut_site", ...}, by default None.
     dump_in_df_to : Optional[Union[str, Path]], optional
@@ -256,7 +317,7 @@ def exec_limma(
         logger.info(f'write temporary limma input file to: "{str(input_path)}"')
         if isinstance(in_data, AbstractQuantificationReport):
             in_data.dump(path=input_path)
-            annotation_data = in_data.exp_setting
+            exp_layout = in_data.exp_layout
             entry_name = in_data.entry_level
             in_data = in_data.df
         else:
@@ -265,22 +326,27 @@ def exec_limma(
         raise ValueError(f"Unsupported input data type: `{type(in_data)}`")
     args = [str(input_path)]
 
-    if annotation_data is None:
-        raise ValueError("Annotation data is required for limma test")
-    if isinstance(annotation_data, (pl.DataFrame, ExperimentSetting)):
-        anno_path = (
-            Path(dump_in_df_to).resolve().with_suffix(".annotation.txt")
-            if (dump_in_df_to is not None)
-            else Path(tempfile.NamedTemporaryFile(suffix=".txt", delete=False).name)
-        )
-        logger.info(f'write temporary annotation file to: "{str(anno_path)}"')
-        if isinstance(annotation_data, ExperimentSetting):
-            annotation_data.dump(anno_path)
-        else:
-            annotation_data.write_csv(anno_path, separator="\t")
-        args.append(str(anno_path))
-    else:
-        args.append(str(annotation_data))
+    if exp_layout is None:
+        raise ValueError("Experiment layout information is required for limma test")
+
+    if condition_pairs is not None:
+        if not isinstance(condition_pairs, str):
+            _condition_pairs = []
+            for cond in condition_pairs:
+                if isinstance(cond, tuple):
+                    _condition_pairs.append(f"{cond[0]}//{cond[1]}")
+                else:
+                    _condition_pairs.append(cond)
+            condition_pairs = ";;".join(_condition_pairs)
+
+    anno_path = (
+        Path(dump_in_df_to).resolve().with_suffix(".annotation.txt")
+        if (dump_in_df_to is not None)
+        else Path(tempfile.NamedTemporaryFile(suffix=".txt", delete=False).name)
+    )
+    logger.info(f'write temporary annotation file to: "{str(anno_path)}"')
+    exp_layout.dump(anno_path)
+    args.append(str(anno_path))
 
     if entry_name is None:
         entry_name = "Entry"
@@ -322,16 +388,17 @@ def exec_limma(
 
 
 @dataclass
-class LimmaConfig(AbstractInferConfig):
-    annotation_data: Optional[Union[ExperimentSetting, pl.DataFrame, str, Path]] = None
+class LimmaPairwiseConfig(AbstractHypoTestConfig):
+    exp_layout: Optional[ExperimentLayout] = None
     entry_name: Optional[str] = None
-    condition_pairs: Optional[str] = None
     output_column_map: Optional[Union[Literal["default"], dict[str, str]]] = "default"
     output_column_map_override: Optional[dict[str, str]] = None
     recollected_columns: Optional[Union[str, Sequence[str]]] = None
     dump_in_df_to: Optional[Union[str, Path]] = None
     del_files: bool = True
     rscript_exec: Union[str, Path] = "Rscript"
+
+    _compare_scope: _T_CompareScope = "pairwise"
 
 
 def scipy_comb_p_with_nan(
@@ -342,8 +409,25 @@ def scipy_comb_p_with_nan(
     return_p_only: bool = True,
 ) -> Union[float, tuple]:
     """
-    A wrapper of `scipy.stats.combine_pvalues` to handle NaN values in the input array.
-    By default, will also just return p-value without statistic.
+    Wrapper for scipy.stats.combine_pvalues that handles NaN values.
+
+    Parameters
+    ----------
+    x : array-like
+        Array of p-values to combine
+    method : str, optional
+        Method for combining p-values
+    weights : array-like, optional
+        Weights for combining p-values
+    ignore_nan : bool, optional
+        If True, skip NaN values. If False, return NaN if any value is NaN
+    return_p_only : bool, optional
+        If True, return only combined p-value without test statistic
+
+    Returns
+    -------
+    Union[float, tuple]
+        Combined p-value if return_p_only=True, else (statistic, p-value) tuple
     """
     if isinstance(x, pl.Series):
         x = x.to_numpy()
@@ -362,7 +446,7 @@ def scipy_comb_p_with_nan(
 def combine_pvalues_in_group(
     df: pl.DataFrame,
     group_col: Union[str, Sequence[str]],
-    expr_condition_for_combine: Optional[pl.Expr] = None,
+    filter_condition_for_combining: Optional[pl.Expr] = None,
     method: str = "fisher",
     p_col: str = "pvalue",
     new_p_col: Optional[str] = None,
@@ -371,6 +455,38 @@ def combine_pvalues_in_group(
 ) -> pl.DataFrame:
     """
     Combine p-values in a group of rows based on the provided method.
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+        Input DataFrame containing p-values to be combined
+    group_col : Union[str, Sequence[str]]
+        Column name(s) to group by before combining p-values
+    filter_condition_for_combining : Optional[pl.Expr], optional
+        Polars expression to indicate the rows to do p-value combining.
+        If None, all rows within groups are used.
+    method : str, optional
+        Method to combine p-values. See `scipy.stats.combine_pvalues`
+    p_col : str, optional
+        Name of column containing p-values to combine, defaults to "pvalue"
+    new_p_col : Optional[str], optional
+        Name for the output column with combined p-values.
+        If None, overwrites the input p-value column.
+    ignore_nan : bool, optional
+        If True, skip NaN values when combining p-values.
+        If False, return NaN if any input p-value is NaN.
+        Defaults to True.
+    return_p_only : bool, optional
+        If True, return only combined p-values.
+        If False, return additional statistics depending on method.
+        Defaults to True.
+
+    Returns
+    -------
+    pl.DataFrame
+        DataFrame with added column containing combined p-values per group.
+        Original DataFrame structure is preserved, with combined p-values
+        repeated for all rows within each group.
     """
     if new_p_col is None:
         new_p_col = p_col
@@ -386,20 +502,43 @@ def combine_pvalues_in_group(
         )
         .over(pl.col(group_col))
     )
-    if expr_condition_for_combine is not None:
-        comb_expr = pl.when(expr_condition_for_combine).then(comb_expr).otherwise(pl.lit(np.nan))
+    if filter_condition_for_combining is not None:
+        comb_expr = pl.when(filter_condition_for_combining).then(comb_expr).otherwise(pl.lit(np.nan))
     return df.with_columns(comb_expr)
 
 
 @dataclass
-class PvalueCombineConfig(AbstractInferConfig):
+class PvalueCombineConfig(AbstractTestAdjustConfig):
+    """
+    Configuration for combining p-values within groups.
+
+    Attributes
+    ----------
+    group_col : Union[str, Sequence[str]]
+        Column(s) to group by before combining p-values
+    filter_condition_for_combining : Optional[pl.Expr]
+        Filter condition for rows to include in combination
+    method : str
+        Method for combining p-values
+    p_col : str
+        Column containing p-values
+    new_p_col : Optional[str]
+        Name for output column with combined p-values
+    ignore_nan : bool
+        Whether to ignore NaN values
+    return_p_only : bool
+        Whether to return only p-values without test statistics
+    """
+
     group_col: Union[str, Sequence[str]] = "cut_site"
-    expr_condition_for_combine: Optional[pl.Expr] = None
+    filter_condition_for_combining: Optional[pl.Expr] = None
     method: str = "fisher"
     p_col: str = "pvalue"
     new_p_col: Optional[str] = None
     ignore_nan: bool = True
     return_p_only: bool = True
+
+    _compare_scope: _T_CompareScope = "all"
 
 
 def agg_values_in_group(
@@ -414,8 +553,28 @@ def agg_values_in_group(
     recollection_attach_method: Literal["leftjoin", "agg_leftjoin"] = "leftjoin",
 ):
     """
-    Aggregate values in a group of rows based on the provided method.
-    Generally, this method is used to combine p-values within a group, and aggregate FCs at the same time.
+    Aggregate values within groups using specified functions.
+    Generally, this method is used to combine p-values and aggregate FCs within a group at the same time.
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+        Input DataFrame
+    group_col : Union[str, Sequence[str]]
+        Column(s) to group by
+    agg_col : Union[str, Sequence[str]]
+        Column(s) to aggregate
+    agg_func : Union[Callable, Sequence[Callable]]
+        Function(s) for aggregation (e.g. np.nanmedian, scipy_comb_p_with_nan)
+    recollected_columns : Optional[Union[str, Sequence[str]]]
+        Additional columns to include in output
+    recollection_attach_method : Literal["leftjoin", "agg_leftjoin"]
+        Method for attaching recollected columns
+
+    Returns
+    -------
+    pl.DataFrame
+        DataFrame with aggregated values per group
     """
     if isinstance(agg_col, str):
         agg_col = [agg_col]
@@ -445,7 +604,22 @@ def agg_values_in_group(
 
 
 @dataclass
-class ValueAggregationConfig(AbstractInferConfig):
+class ValueAggregationConfig(AbstractTestAdjustConfig):
+    """
+    Configuration for aggregating values within groups.
+
+    Attributes
+    ----------
+    group_col : Union[str, Sequence[str]]
+        Column(s) to group by for aggregation
+    agg_col : Union[str, Sequence[str]]
+        Column(s) to aggregate
+    agg_func : Union[Callable, Sequence[Callable]]
+        Function(s) to use for aggregation
+    recollected_columns : Optional[Union[str, Sequence[str]]]
+        Additional columns to recollect after aggregation
+    """
+
     group_col: Union[str, Sequence[str]] = ("pair", "cut_site")
     agg_col: Union[str, Sequence[str]] = ("fc", "pvalue")
     agg_func: Union[Callable, Sequence[Callable]] = (
@@ -453,6 +627,8 @@ class ValueAggregationConfig(AbstractInferConfig):
         scipy_comb_p_with_nan,
     )
     recollected_columns: Optional[Union[str, Sequence[str]]] = None
+
+    _compare_scope: _T_CompareScope = "all"
 
 
 def assign_sign(
@@ -587,7 +763,7 @@ def filter_sign_select_min_one(
 
 
 @dataclass
-class SignVotingConfig(AbstractInferConfig):
+class SignVotingConfig(AbstractTestAdjustConfig):
     """
     By default, `drop_opposite_sign`, `drop_bidirectional_balanced_group`, and `filter_value_col` are all None.
     And no filtering will be conducted, just assign the sign columns.
@@ -609,6 +785,8 @@ class SignVotingConfig(AbstractInferConfig):
     drop_opposite_sign: Optional[bool] = None
     drop_bidirectional_balanced_group: Optional[bool] = None
     filter_value_col: Optional[str] = None
+
+    _compare_scope: _T_CompareScope = "all"
 
 
 def sign_voting_in_group(
@@ -688,19 +866,21 @@ def fdr_on_df(
 
 
 @dataclass
-class FDRConfig(AbstractInferConfig):
+class FDRConfig(AbstractTestAdjustConfig):
     group: Optional[Union[str, Sequence[str]]] = None
     pre_filter: Optional[pl.Expr] = None
     p_col: str = "pvalue"
     new_col_name: str = "adj_pvalue"
     method: Literal["BH", "BY"] = "BH"
 
+    _compare_scope: _T_CompareScope = "all"
 
-def do_stats_on_df(
+
+def do_hypo_test_on_df(
     df: pl.DataFrame,
-    exp_runs: Optional[Sequence[str]] = None,
-    ctrl_runs: Optional[Sequence[str]] = None,
-    config: Optional[Union[AbstractInferConfig, Sequence[Union[AbstractInferConfig, AbstractDFManiConfig]]]] = None,
+    config: Optional[Union[AbstractHypoTestConfig, Sequence[AbstractHypoTestConfig]]] = None,
+    condition_pairs: Optional[Union[str, Sequence[Union[str, tuple[str, str]]]]] = None,
+    exp_layout: Optional[ExperimentLayout] = None,
 ) -> pl.DataFrame:
     """
     Perform statistical analysis on a DataFrame based on the provided configuration(s).
@@ -713,54 +893,35 @@ def do_stats_on_df(
     ----------
     df : pl.DataFrame
         The input DataFrame containing the data to be analyzed.
-    exp_runs : Sequence[str]
-        A sequence of column names representing the experimental runs.
-    ctrl_runs : Sequence[str]
-        A sequence of column names representing the control runs.
-    config : Union[AbstractInferConfig, Sequence[Union[AbstractInferConfig, AbstractDFManiConfig]]]
+    config : Union[AbstractHypoTestConfig, Sequence[AbstractHypoTestConfig]]
         A single configuration object or a sequence of configuration objects that define the statistical operations
-        to be performed. The configuration objects can be instances of `TTestConfig`, `LimmaConfig`, `PvalueCombineConfig`,
-        `ValueAggregationConfig`, `SignVotingConfig`, `FDRConfig`, or `AbstractDFManiConfig`.
+        to be performed. The configuration objects can be instances of `TTestConfig` or `LimmaConfig`.
 
-    Returns
-    -------
-    pl.DataFrame
-        The DataFrame with the results of the statistical operations applied.
-
-    Raises
-    ------
-    ValueError
-        If more than one of `TTestConfig` or `LimmaConfig` is provided in the configuration list.
-        If an unexpected configuration type is passed.
-
-    Examples
-    --------
-    >>> config = TTestConfig(equal_var=True, min_nonnan_count=3)
-    >>> result_df = do_stats_on_df(df, exp_runs=["exp1", "exp2"], ctrl_runs=["ctrl1", "ctrl2"], config=config)
-    >>> print(result_df)
     """
-    if isinstance(config, AbstractInferConfig):
+    if isinstance(config, AbstractHypoTestConfig):
         config = (config,)
-    if sum(isinstance(conf, (TTestConfig, LimmaConfig)) for conf in config) > 1:
+    if sum(isinstance(conf, (TTestConfig, LimmaPairwiseConfig)) for conf in config) > 1:
         raise ValueError("Only one of `TTestConfig` and `LimmaConfig` can be provided in the config list")
     for conf in config:
         if isinstance(conf, TTestConfig):
             df = ttest_on_df(
                 df,
-                exp_runs,
-                ctrl_runs,
+                condition_pairs=condition_pairs,
+                exp_layout=exp_layout,
+                entry_col=conf.entry_col,
+                recollected_columns=conf.recollected_columns,
                 equal_var=conf.equal_var,
                 one_side_alt_when_full_zero=conf.one_side_alt_when_full_zero,
                 min_nonnan_count=conf.min_nonnan_count,
                 t_col=conf.t_col,
                 p_col=conf.p_col,
             )
-        elif isinstance(conf, LimmaConfig):
+        elif isinstance(conf, LimmaPairwiseConfig):
             df, _, _ = exec_limma(
                 df,
-                annotation_data=conf.annotation_data,
+                condition_pairs=condition_pairs,
+                exp_layout=exp_layout,
                 entry_name=conf.entry_name,
-                condition_pairs=conf.condition_pairs,
                 output_column_map=conf.output_column_map,
                 output_column_map_override=conf.output_column_map_override,
                 recollected_columns=conf.recollected_columns,
@@ -768,11 +929,37 @@ def do_stats_on_df(
                 del_files=conf.del_files,
                 rscript_exec=conf.rscript_exec,
             )
-        elif isinstance(conf, PvalueCombineConfig):
+        else:
+            raise ValueError(f"An unexpected config is passed, with type: {type(conf)}")
+    return df
+
+
+_T_TestAdjustConfig = Union[
+    AbstractTestAdjustConfig,
+    AbstractDFManiConfig,
+    Callable,
+]
+
+
+def do_test_adjust_on_df(
+    df: pl.DataFrame,
+    config: Optional[Union[_T_TestAdjustConfig, Sequence[_T_TestAdjustConfig]]] = None,
+) -> pl.DataFrame:
+    """
+    Perform adjustments on hypothesis test results based on the provided configuration(s).
+
+    This function applies a series of statistical operations to the DataFrame, such as p-value combination,
+    value aggregation, sign voting, and FDR correction. The operations are determined by the
+    configuration(s) provided in the `config` parameter.
+    """
+    if isinstance(config, _T_TestAdjustConfig):
+        config = (config,)
+    for conf in config:
+        if isinstance(conf, PvalueCombineConfig):
             df = combine_pvalues_in_group(
                 df,
                 group_col=conf.group_col,
-                expr_condition_for_combine=conf.expr_condition_for_combine,
+                filter_condition_for_combining=conf.filter_condition_for_combining,
                 method=conf.method,
                 p_col=conf.p_col,
                 new_p_col=conf.new_p_col,
@@ -800,6 +987,8 @@ def do_stats_on_df(
             )
         elif isinstance(conf, AbstractDFManiConfig):
             df = do_df_mani(df, conf)
+        elif isinstance(conf, Callable):
+            df = conf(df)
         else:
             raise ValueError(f"An unexpected config is passed, with type: {type(conf)}")
     return df

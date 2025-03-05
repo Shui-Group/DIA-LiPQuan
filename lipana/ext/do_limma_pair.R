@@ -1,5 +1,4 @@
 # This script is used to perform limma on the input file
-# This will do pairwise comparison between conditions, for group comparison, see do_limma_group.R
 # This script requires at least 3 arguments:
 # 1. A quantification matrix file, with rows as entries and columns as runs, and a column to annotate entry name in each row
 # 2. A annotation file, with at least two columns "run" and "condition" (can directly use the experiment setting file used in lipana); or a string in format like "run1::c1;;run2::c1;;run3::c2;;run4::c2" to specify the condition for each run
@@ -9,7 +8,7 @@
 #   b. condition pairs separated by "//", like "cond1//cond2;;cond3//cond2"
 #   c. if this argument is not provided, will compare all available pairs
 #   (a and b can be mixed, like "cond1//cond3;;cond2" will be flatten as "cond1//cond3;;cond1//cond2;;cond3//cond2")
-# Note: For each pair, each condition requires at least 2 runs with quantification values
+# Note: To ensure each condition has at least 2 runs with quantification values, this script is made to do statistics on each pair iteratively, instead of modeling the whole matrix at once
 
 args <- commandArgs(trailingOnly = TRUE)
 

@@ -1,6 +1,7 @@
 """
 nterm_enzymatic_type: "restricted", "non_restricted", "terminal", "after_m_terminal"
 cterm_enzymatic_type: "restricted", "non_restricted", "terminal"
+
 """
 
 import functools
@@ -1006,10 +1007,10 @@ def convert_long_report_to_wide(
     elif reverse_log_scale is not None:
         df = df.with_columns((reverse_log_scale ** pl.col(value_col).cast(pl.Float32)).alias(value_col))
 
-    df = df.pivot(column_col, index=index_col, values=value_col, aggregate_function=agg_method)
+    wide_df = df.pivot(column_col, index=index_col, values=value_col, aggregate_function=agg_method)
     if recollected_annotation_cols is None:
-        return df
-    return df.join(
+        return wide_df
+    return wide_df.join(
         df.select(recollected_annotation_cols).unique(index_col),
         on=index_col,
         how="left",
