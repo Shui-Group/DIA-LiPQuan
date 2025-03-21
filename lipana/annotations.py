@@ -692,6 +692,7 @@ def construct_input_for_quant_aggregation(
             new_df.select([run_col, primary_entry_col, entry_col, quant_col])
             .with_columns(
                 pl.col(entry_col).add("_").add(quant_col).alias(entry_col),  # ensure unique id
+                pl.col(quant_col).cast(pl.Float64).alias(quant_col),
             )
             .filter(thres)
             .rename(

@@ -250,6 +250,7 @@ def sequential_impute(
 
     Reference: Sequential imputation for missing values. doi: 10.1016/j.compbiolchem.2007.07.001.
     """
+    _mat_raw_order = "C" if mat.flags.c_contiguous else "F"
 
     if copy_input:
         mat = copy.deepcopy(mat)
@@ -276,7 +277,7 @@ def sequential_impute(
         fullfill_cov = np.cov(fullfill_subx, rowvar=False)
         fullfill_colmean = np.mean(fullfill_subx, axis=0)
 
-        inv_fullfill_cov = np.linalg.inv(fullfill_cov)
+        inv_fullfill_cov = np.linalg.pinv(fullfill_cov)
 
         nan_idx = np.where(nan_mat[impute_row_idx])[0]
         nonnan_idx = np.where(~nan_mat[impute_row_idx])[0]
@@ -291,7 +292,7 @@ def sequential_impute(
         fullfill_row_idx = np.hstack((fullfill_row_idx, impute_row_idx))
         fullfill_subx = mat[fullfill_row_idx]
 
-    return mat, True
+    return np.asarray(mat, order=_mat_raw_order), True
 
 
 @dataclass
@@ -428,15 +429,13 @@ def do_group_missing_value_handling_on_df(
 
     Set `raw_values_suffix` to a string to have the original values in the input dataframe attached as a new column with the string added to the original column names.
     """
-    if raw_values_suffix is not None:
-        df = df.rename({r: f"{r}{raw_values_suffix}" for r in runs})
-    return pl.concat(
-        [
-            df,
-            pl.from_numpy(
-                do_group_missing_value_handling(df.select(runs).to_numpy(), config),
-                runs,
-            ),
-        ],
-        how="vertical",
+    result = pl.from_numpy(
+        do_group_missing_value_handling(df.select(runs).to_numpy(order="c"), config),
+        runs,
     )
+
+    if raw_values_suffix is None:
+        df = df.drop(runs)
+    else:
+        df = df.rename({r: f"{r}{raw_values_suffix}" for r in runs})
+    return pl.concat([df, result], how="horizontal")

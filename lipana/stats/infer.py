@@ -740,25 +740,31 @@ def filter_sign_select_min_one(
     n_per_group_col = "".join(random.sample(string.ascii_lowercase, 10))
     sel_min_expr = pl.col(value_col).eq(pl.col(value_col).min().over(group_col))
 
-    return df.with_columns(pl.col(row_sign_col).len().over(group_col).alias(n_per_group_col)).filter(
-        pl
-        # First filter out the groups have sum of direction equals to 0
-        .when(pl.col(group_sign_col).eq(0))
-        .then(pl.lit(False))
-        # Then filter out the groups have abs of sum of direction <= number of rows / 2
-        .when((pl.col(row_sign_col).sum().abs().le(pl.col(row_sign_col).len().truediv(2))).over(group_col))
-        .then(pl.lit(False))
-        # Groups have only one row with sign +/- 1
-        .when(pl.col(n_per_group_col).eq(1))
-        .then(pl.lit(True))
-        # Groups have two rows with same sign +1 or -1, select one based on min of a column
-        .when(pl.col(n_per_group_col).eq(2))
-        .then(sel_min_expr)
-        # Because groups have already been filtered to have at least half of rows with +1 or -1 signs
-        # When rows >=3 in each group, select one with min of a column from those rows with same sign of the group
-        # .when(pl.col(n_per_group_col).mod(2).eq(1))
-        # .when(pl.col(n_per_group_col).mod(2).eq(0))
-        .otherwise(pl.when(pl.col(row_sign_col).eq(pl.col(group_sign_col))).then(sel_min_expr).otherwise(pl.lit(False)))
+    return (
+        df.with_columns(pl.col(row_sign_col).len().over(group_col).alias(n_per_group_col))
+        .filter(
+            pl
+            # First filter out the groups have sum of direction equals to 0
+            .when(pl.col(group_sign_col).eq(0))
+            .then(pl.lit(False))
+            # Then filter out the groups have abs of sum of direction <= number of rows / 2
+            .when((pl.col(row_sign_col).sum().abs().le(pl.col(row_sign_col).len().truediv(2))).over(group_col))
+            .then(pl.lit(False))
+            # Groups have only one row with sign +/- 1
+            .when(pl.col(n_per_group_col).eq(1))
+            .then(pl.lit(True))
+            # Groups have two rows with same sign +1 or -1, select one based on min of a column
+            .when(pl.col(n_per_group_col).eq(2))
+            .then(sel_min_expr)
+            # Because groups have already been filtered to have at least half of rows with +1 or -1 signs
+            # When rows >=3 in each group, select one with min of a column from those rows with same sign of the group
+            # .when(pl.col(n_per_group_col).mod(2).eq(1))
+            # .when(pl.col(n_per_group_col).mod(2).eq(0))
+            .otherwise(
+                pl.when(pl.col(row_sign_col).eq(pl.col(group_sign_col))).then(sel_min_expr).otherwise(pl.lit(False))
+            )
+        )
+        .drop(n_per_group_col)
     )
 
 

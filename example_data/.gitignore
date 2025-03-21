@@ -1,0 +1,6 @@
+*
+!.gitignore
+!example_diann_report.txt.gz
+!human_yeast_contam.fasta.gz
+!contam.fasta
+!experiment_layout.txt

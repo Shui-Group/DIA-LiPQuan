@@ -470,18 +470,29 @@ class SearchReport(AbstractSearchReport):
             return result[list(result.keys())[0]]
         return result
 
-    def show_status(self, name: str = None, compact: bool = True) -> None:
+    def show_status(
+        self, name: str = None, compact: bool = True, log_status: bool = True, return_str: bool = False
+    ) -> None:
         msgs = [
             f"Search report{f' "{name}"' if (name is not None) else ''} object with main report shape: {self.df.shape}",
             f"Number of quantification data: {len(self.quant_data)}",
             f"Number of statistics results: {len(self.stats_result)}",
             f"Workspace: {self.workspace}",
         ]
-        if compact:
-            logger.info(" | ".join(msgs))
-        else:
-            for msg in msgs:
-                logger.info(msg)
+        if log_status:
+            if compact:
+                logger.info(" | ".join(msgs))
+            else:
+                for msg in msgs:
+                    logger.info(msg)
+        if return_str:
+            if compact:
+                return " | ".join(msgs)
+            else:
+                return "\n".join(msgs)
+
+    def __repr__(self) -> str:
+        return self.show_status(compact=False, log_status=False, return_str=True)
 
     def dump(
         self,

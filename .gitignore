@@ -1,4 +1,5 @@
 # Cache
+.cache
 ~$*
 ~*.tmp
 __MACOSX
@@ -6,31 +7,12 @@ __MACOSX
 # IPyNotebook
 .ipynb_checkpoints
 
-# Package cache
-dask-worker-space/
-mydask.png
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
+.pytest_cache/
 *.so
 
-# Unit test / coverage reports
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-
-# Environments
-.env
-.venv
-env.bak/
-venv.bak/
+# Doc
+doc/build/

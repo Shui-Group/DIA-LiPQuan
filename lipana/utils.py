@@ -284,6 +284,12 @@ class DFColRenameConfig(AbstractDFManiConfig):
     rename_dict: Mapping[str, str]
 
 
+@dataclass
+class DFAddLitColConfig(AbstractDFManiConfig):
+    col_name: str
+    value: Any
+
+
 def do_df_mani(
     df: pl.DataFrame,
     config: Optional[Union[AbstractDFManiConfig, Sequence[AbstractDFManiConfig]]] = None,
@@ -304,6 +310,8 @@ def do_df_mani(
             df = df.rename(conf.rename_dict)
         elif isinstance(conf, DFConcatConfig):
             df = pl.concat(df, how=conf.how)
+        elif isinstance(conf, DFAddLitColConfig):
+            df = df.with_columns(pl.lit(conf.value).alias(conf.col_name))
         else:
             raise ValueError(f"Unexpected DataFrame manipulation config: {conf}")
     return df

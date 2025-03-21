@@ -1,4 +1,5 @@
 import logging
+import shutil
 from pathlib import Path
 from typing import Optional, Sequence, Union
 
@@ -14,6 +15,7 @@ __all__ = [
     "spectronaut_report_loading_filter",
     "SpectronautReport",
     "load_spectronaut_search_report",
+    "export_sn_report_setting",
 ]
 
 logger = logging.getLogger("lipana")
@@ -106,27 +108,24 @@ def load_spectronaut_search_report(
     if pre_annotation_filter is not None:
         df = df.filter(pre_annotation_filter)
 
-    df = (
-        df.rename(
-            {
-                "R.FileName": cm.run,
-                "PG.ProteinGroups": cm.protein_group,
-                "PEP.StrippedSequence": cm.stripped_peptide,
-                "EG.ModifiedPeptide": cm.modified_peptide,
-                "FG.Charge": cm.precursor_charge,
-                # "PG.Quantity": cm.protein_group_quantity,
-                # "PEP.Quantity": cm.stripped_peptide_quantity,
-                # "EG.TotalQuantity (Settings)": cm.modified_peptide_quantity,
-                "FG.Quantity": cm.precursor_quantity_normalised,
-                "FG.MS1RawQuantity": cm.precursor_quantity_ms1,
-                "FG.MS1Quantity": cm.precursor_quantity_ms1_normalised,
-                "FG.MS2RawQuantity": cm.precursor_quantity_ms2,
-                "FG.MS2Quantity": cm.precursor_quantity_ms2_normalised,
-            }
-        )
-        .with_columns(
-            pl.col(cm.precursor_quantity_ms2).alias(cm.precursor_quantity),
-        )
+    df = df.rename(
+        {
+            "R.FileName": cm.run,
+            "PG.ProteinGroups": cm.protein_group,
+            "PEP.StrippedSequence": cm.stripped_peptide,
+            "EG.ModifiedPeptide": cm.modified_peptide,
+            "FG.Charge": cm.precursor_charge,
+            # "PG.Quantity": cm.protein_group_quantity,
+            # "PEP.Quantity": cm.stripped_peptide_quantity,
+            # "EG.TotalQuantity (Settings)": cm.modified_peptide_quantity,
+            "FG.Quantity": cm.precursor_quantity_normalised,
+            "FG.MS1RawQuantity": cm.precursor_quantity_ms1,
+            "FG.MS1Quantity": cm.precursor_quantity_ms1_normalised,
+            "FG.MS2RawQuantity": cm.precursor_quantity_ms2,
+            "FG.MS2Quantity": cm.precursor_quantity_ms2_normalised,
+        }
+    ).with_columns(
+        pl.col(cm.precursor_quantity_ms2).alias(cm.precursor_quantity),
     )
     if modification_map is not None:
         df = df.with_columns(
@@ -149,3 +148,11 @@ def load_spectronaut_search_report(
     if write_processed_report:
         write_df_to_parquet_or_tsv(df, processed_report_path)
     return df
+
+
+def export_sn_report_setting(path: Union[str, Path]):
+    """
+    Export a Spectronaut report setting file (.rs file) to destination path.
+    """
+    ori_path = Path(__file__).resolve().parent.parent.joinpath("assets", "sn_report_setting.rs")
+    shutil.copy(ori_path, path)

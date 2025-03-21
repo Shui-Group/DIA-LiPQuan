@@ -125,6 +125,7 @@ def parse_fasta(
     fasta_path: Union[str, Path, Sequence[Union[str, Path]]] = None,
     contam_fasta_path: Union[str, Path, Sequence[Union[str, Path]]] = None,
     contaminations: Optional[Union[str, Sequence[str]]] = None,
+    gen_species_to_concat_seqs: bool = True,
     workspace: Optional[Union[str, Path]] = None,
     resume: Union[bool, str, Path] = True,
     write_parsed_fasta: bool = True,
@@ -213,7 +214,10 @@ def parse_fasta(
 
     prot_acc_to_seq = {}
     prot_acc_to_species = {}
-    species_to_concat_seqs = defaultdict(str)
+    if gen_species_to_concat_seqs:
+        species_to_concat_seqs = defaultdict(str)
+    else:
+        species_to_concat_seqs = None
 
     is_whole_contam = [True] * len(contam_fasta_path) + [False] * len(fasta_path)
     n_files = len(is_whole_contam)
@@ -238,7 +242,8 @@ def parse_fasta(
 
             prot_acc_to_seq[acc] = seq
             prot_acc_to_species[acc] = species
-            species_to_concat_seqs[species] += f"{seq}-"
+            if gen_species_to_concat_seqs:
+                species_to_concat_seqs[species] += f"{seq}-"
 
     parsed_fasta = ParsedFasta(
         prot_acc_to_seq=prot_acc_to_seq,
