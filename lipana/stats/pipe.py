@@ -67,13 +67,14 @@ def do_stats_pipeline_pairwise(
     base_entry_col: Optional[str] = None,
     group_entry_col: Optional[str] = None,
     missing_value_config: Optional[AbstractMissingValueHandler] = None,
-    pipeline: Literal["sel_min_p", "combine_p", "direct_test"] = "sel_min_p",
+    pipeline: Literal["sel_min_p", "sel_min_p_from_all", "combine_p", "direct_test"] = "sel_min_p",
     return_chains: bool = False,
 ):
     """
     This is a general entry point for pairwise comparison pipelines.
     Three pre-defined pipelines are supported:
     - "sel_min_p": select the one with the lowest p-value for each target entry. (e.g. select the precursor with min p-value for each protein)
+    - "sel_min_p_from_all": select the one with the lowest p-value for each target entry without pre-filtering.
     - "combine_p": combine p-values for each target entry. (e.g. combine p-values of precursors for each cut site)
     - "direct_test": directly test on target entry level. (e.g. do test on quantification matrix of peptide directly)
 
@@ -100,13 +101,15 @@ def do_stats_pipeline_pairwise(
     missing_value_config: Optional[AbstractMissingValueHandler]
         The configuration for missing value handling.
         If None, by default a `FullEmptyFillingMissingValueHandler` will be used.
-    pipeline: Literal["sel_min_p", "combine_p", "direct_test"]
+    pipeline: Literal["sel_min_p", "sel_min_p_from_all", "combine_p", "direct_test"]
         1. "sel_min_p": This pipeline will do tests on the base entry and select the one with the lowest p-value for each target entry.
+            Before selection, there will be a pre-filtering step to remove the rows with opposite signs.
             For example, set `target_entry` to "cut_site" and `base_entry` to "precursor", then the pipeline will select the precursor with the lowest p-value for each cut site.
             If group_entry is provided, do FDR control within groups, else do FDR control on all data.
-        2. "combine_p": This pipeline will do tests on the base entry andcombine p-values for each target entry.
+        2. "sel_min_p_from_all": Similar to "sel_min_p", but without the pre-filtering step.
+        3. "combine_p": This pipeline will do tests on the base entry andcombine p-values for each target entry.
             For example, set `target_entry` to "cut_site" and `base_entry` to "precursor", then the pipeline will combine p-values of precursors for each cut site.
-        3. "direct_test": This pipeline will do tests on the target entry level.
+        4. "direct_test": This pipeline will do tests on the target entry level.
             For example, when the target is stripped peptide, `qdf` should be the quantification matrix of peptide, and `target_entry` is "stripped_peptide" and `base_entry` should be None.
     """
     used_conditions = design.used_conditions
@@ -122,13 +125,16 @@ def do_stats_pipeline_pairwise(
         missing_value_config = None
         _do_pairwise_mv_handling = False
 
-    if pipeline in ["sel_min_p", "combine_p"]:
+    if pipeline in ["sel_min_p", "sel_min_p_from_all", "combine_p"]:
         if base_entry_col is None:
-            raise ValueError("`base_entry_col` is required when `pipeline` is `sel_min_p` or `combine_p`.")
+            raise ValueError(
+                "`base_entry_col` is required when `pipeline` is `sel_min_p`, `sel_min_p_from_all` or `combine_p`."
+            )
         primary_annotation_col = base_entry_col
     elif pipeline == "direct_test":
         if base_entry_col is not None:
-            raise ValueError("`base_entry_col` should not be provided when `pipeline` is `direct_test`.")
+            if base_entry_col != target_entry_col:
+                raise ValueError("`base_entry_col` should be None or the same as `target_entry_col` when `pipeline` is `direct_test`.")
         primary_annotation_col = target_entry_col
     else:
         raise ValueError(f"Invalid pipeline: {pipeline}")
@@ -175,7 +181,7 @@ def do_stats_pipeline_pairwise(
             ),
         ]
 
-        if pipeline in ["sel_min_p", "combine_p"]:
+        if pipeline in ["sel_min_p", "sel_min_p_from_all", "combine_p"]:
             one_chain.append(
                 functools.partial(
                     attach_annotation_from_other_df,
@@ -198,6 +204,10 @@ def do_stats_pipeline_pairwise(
                             filter_value_col="pvalue",
                         ),
                     )
+                )
+            elif pipeline == "sel_min_p_from_all":
+                one_chain.append(
+                    lambda df: df.filter(pl.col("pvalue").eq(pl.col("pvalue").min().over(target_entry_col)))
                 )
             else:
                 one_chain.append(
@@ -239,7 +249,7 @@ def do_stats_pipeline_pairwise(
                 ),
             )
         )
-        if group_entry_col is not None:
+        if (group_entry_col is not None) and (group_entry_col != target_entry_col):
             one_chain.append(
                 functools.partial(
                     attach_annotation_from_other_df,
