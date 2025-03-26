@@ -1,6 +1,7 @@
 import itertools
 import logging
 import pickle
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -121,10 +122,53 @@ def read_fasta(
     return fasta_dict
 
 
+def _parse_uniprot_fasta_title(title: str) -> dict[str, str]:
+    """
+    A simple approach to parse UniProt title into a dictionary containing:
+    - protein: Protein ID
+    - species: Species name
+    """
+    acc, entry_name = title.split(" ")[0].split("|")[1:]
+    species = entry_name.split("_")[1]
+    return {"protein": acc, "species": species}
+
+
+def _parse_fasta_title_regex(
+    title: str,
+    regex: Union[str, Sequence[str]] = r">[^|\s]+?\|(?P<protein>[^|\s]+?)\|[^\s]+?_(?P<species>[^\s]+)[$\s].*",
+) -> dict[str, str]:
+    """
+    Parse a FASTA title with one or more regexes, and return a dictionary containing:
+    - protein: Protein ID
+    - species: Species name
+
+    In the case with multiple regexes, they will be tried in order, and stop until two keys are found.
+    If iteration is finished but species is not found, return the first result that contains "protein" key.
+    If iteration is finished but "protein" is not found, raise an error.
+    """
+    if isinstance(regex, str):
+        regex = [regex]
+    records = []
+    for r in regex:
+        r = re.match(r, title)
+        if r:
+            if "protein" in r.groupdict() and "species" in r.groupdict():
+                return r.groupdict()
+            else:
+                records.append(r.groupdict())
+    if len(records) == 0:
+        raise ValueError(f"Can not find protein and species in title: {title}, by regex: {regex}")
+    for r in records:
+        if "protein" in r:
+            return r
+    raise ValueError(f"Can not find protein in title: {title}, by regex: {regex}")
+
+
 def parse_fasta(
     fasta_path: Union[str, Path, Sequence[Union[str, Path]]] = None,
     contam_fasta_path: Union[str, Path, Sequence[Union[str, Path]]] = None,
     contaminations: Optional[Union[str, Sequence[str]]] = None,
+    fasta_title_regex: Optional[str] = None,
     gen_species_to_concat_seqs: bool = True,
     workspace: Optional[Union[str, Path]] = None,
     resume: Union[bool, str, Path] = True,
@@ -149,7 +193,19 @@ def parse_fasta(
         These files will be loaded before the target files, and all proteins in these files will be marked as contaminations
     contaminations : Optional[Union[str, Sequence[str]]], optional
         Directly define which entry should be contaminations, by default None
-        This can be a single string or a sequence of strings, and each string can be a protein accession, entry name, or species name
+        This can be a single string or a sequence of strings, and each string can be a protein accession or species name
+    fasta_title_regex : Optional[Union[str, Sequence[str]]], optional
+        A regex or a sequence of regexes to parse the title of the fasta file, by default None
+        If not given or None, the title will be parsed as UniProt format in a simple way
+        If given, the value should be a regex or a sequence of regexes, and the title will be parsed by the regexes in order
+        Example:
+        - If the title is ">sp|P02662|CASA1_BOVIN .....", the default method will extract "P02662" as protein and "BOVIN" as species
+        - If the title is ">sp|P02662|CASA1_BOVIN .....", and fasta_title_regex is r">[^|\s]+?\|(?P<protein>[^|\s]+?)\|[^\s]+?_(?P<species>[^\s]+)[$\s].*", the protein will be "P02662" and the species will be "BOVIN"
+        - If there are titles with mixed formats, like ">sp|P02662|CASA1_BOVIN ....." and ">Q32MB2 TREMBL:Q32MB2 Tax_Id=9606 Gene_Symbol=KRT73", set regex to [r">[^|\s]+?\|(?P<protein>[^|\s]+?)\|[^\s]+?_(?P<species>[^\s]+)[$\s].*", r">(?P<protein>[^\ ]+).+?Tax_Id=(?P<species>[^\ ]+).*?"] can handle this case
+        The protein identifier must be found in all titles, otherwise an error will be raised
+        When the protein can be found but species can not be found, the species will be set to "unknown"
+    gen_species_to_concat_seqs : bool, optional
+        Whether to generate the species to concatenated protein sequences, by default True
     workspace : Optional[Union[str, Path]], optional
         Where to dump or resume the existing file, by default None
         This only works when resume is True or write_parsed_fasta is True
@@ -224,19 +280,18 @@ def parse_fasta(
 
     for file_idx, path in enumerate(itertools.chain(contam_fasta_path, fasta_path)):
         logger.info(f"Loading FASTA file {file_idx + 1}/{n_files}: {path.name}")
-        fasta_data = read_fasta(path, sep=" ", ident_idx=0)
+        fasta_data = read_fasta(path, sep=None, ignore_blank=True)
         for title, seq in fasta_data.items():
-            acc, entry_name = title.split("|")[1:]
-            species = entry_name.split("_")[1]
+            if fasta_title_regex is None:
+                title_re = _parse_uniprot_fasta_title(title)
+            else:
+                title_re = _parse_fasta_title_regex(title, fasta_title_regex)
+            acc = title_re["protein"]
+            species = title_re.get("species", "unknown")
             if acc in prot_acc_to_seq:
                 continue
 
-            if (
-                is_whole_contam[file_idx]
-                or (acc in contaminations)
-                or (entry_name in contaminations)
-                or (species in contaminations)
-            ):
+            if is_whole_contam[file_idx] or (acc in contaminations) or (species in contaminations):
                 species = "Contam"
                 contaminations.add(acc)
 
