@@ -8,30 +8,79 @@ import numpy as np
 import polars as pl
 
 __all__ = [
-    "flatten_nested_list",
+    "flatten_list",
+    "subtract_list",
+    "unique_list_ordered",
     "exec_r_script",
     "normalize_tuple",
     "lookup_dict_with_tuple_key",
     "_T_InputOrAll",
     "gather_value_or_all",
     "check_query_in_vec",
+    "filter_top_n_by_group",
+    "add_bool_mark_by_expr",
     "write_df_to_parquet_or_tsv",
     "read_df_from_parquet_or_tsv",
     "resume_file",
     "AbstractDFManiConfig",
     "DFUniqueConfig",
     "DFFilterConfig",
+    "DFDropColConfig",
+    "DFConcatConfig",
+    "DFColRenameConfig",
+    "DFAddLitColConfig",
     "do_df_mani",
 ]
 
 logger = logging.getLogger("lipana")
 
 
-def flatten_nested_list(nested_list: list[list]) -> list:
-    temp = []
-    for _ in nested_list:
-        temp.extend(_)
-    return temp
+def flatten_list(nested_list: list[Union[list, Any]]) -> list[Any]:
+    flattened = []
+    for elem in nested_list:
+        if isinstance(elem, list):
+            flattened.extend(flatten_list(elem))
+        else:
+            flattened.append(elem)
+    return flattened
+
+
+def subtract_list(inlist: list[Any], *sublists: list[Any]) -> list[Any]:
+    """
+    Remove elements from the input list if they appear in any of the provided sublists.
+
+    Parameters
+    ----------
+    inlist : list[Any]
+        The input list to filter elements from
+    *sublists : list[Any]
+        One or more lists containing elements to be removed from inlist
+
+    Returns
+    -------
+    list[Any]
+        A new list with elements from inlist that are not present in any of the sublists
+    """
+    if not sublists:
+        return inlist.copy()
+
+    # Combine all sublists into a single set for efficient lookups
+    elements_to_remove = set()
+    for sublist in sublists:
+        elements_to_remove.update(sublist)
+
+    # Return elements from inlist that are not in elements_to_remove
+    return [item for item in inlist if item not in elements_to_remove]
+
+
+def unique_list_ordered(items: list[Any]) -> list[Any]:
+    seen = set()
+    result = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
 
 
 def exec_r_script(
@@ -207,6 +256,93 @@ def check_query_in_vec(
     return [q in vec for q in query]
 
 
+def filter_top_n_by_group(
+    df: Optional[pl.DataFrame] = None,
+    group_by: Union[str, Sequence[str]] = None,
+    value_col: str = None,
+    n: int = 1,
+    use_min: bool = True,
+    as_pl_expr: bool = False,
+) -> Union[pl.Expr, pl.DataFrame]:
+    """
+    Create expression or filter DataFrame to keep top N rows within each group.
+
+    Generates a filter expression that selects N rows with smallest values
+    (if use_min=True) or largest values (if use_min=False) of value_col
+    within each group defined by group_by.
+
+    Parameters
+    ----------
+    df : Optional[pl.DataFrame], default=None
+        Input DataFrame to filter. Required unless as_pl_expr=True.
+    group_by : Union[str, Sequence[str]]
+        Column(s) to group by
+    value_col : str
+        Column to rank values within each group
+    n : int, default=1
+        Number of rows to keep in each group
+    use_min : bool, default=True
+        If True, keep n smallest values; if False, keep n largest values
+    as_pl_expr : bool, default=False
+        If True, return a boolean expression; if False, return filtered DataFrame
+
+    Returns
+    -------
+    Union[pl.Expr, pl.DataFrame]
+        A boolean expression for filtering if as_pl_expr=True,
+        otherwise the filtered DataFrame
+    """
+    if not as_pl_expr and df is None:
+        raise ValueError("DataFrame must be provided when as_pl_expr=False")
+    if group_by is None:
+        raise ValueError("group_by parameter is required")
+    if value_col is None:
+        raise ValueError("value_col parameter is required")
+
+    groups = [group_by] if isinstance(group_by, str) else list(group_by)
+    descending = not use_min
+    expr = pl.col(value_col).rank(descending=descending, method="min").le(n).over(groups)
+
+    if as_pl_expr:
+        return expr
+    return df.filter(expr)
+
+
+def add_bool_mark_by_expr(
+    df: pl.DataFrame,
+    expr: Union[pl.Expr, str, bool],
+    mark_col: str,
+) -> pl.DataFrame:
+    """
+    Will add a column `mark_col` to the input dataframe and return it.
+    The value of the column will be True if the expression is True, otherwise False.
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+        The input dataframe.
+    expr : Union[pl.Expr, str, bool]
+        The expression to evaluate.
+        When `expr` is a string, it will be evaluated as a column name.
+        When `expr` is a boolean, it will be used directly as the value.
+    mark_col : str
+        The name of the column to add.
+
+    Returns
+    -------
+    pl.DataFrame
+        The input dataframe with the new column.
+    """
+    if isinstance(expr, pl.Expr):
+        return df.with_columns(pl.when(expr).then(pl.lit(True)).otherwise(pl.lit(False)).alias(mark_col))
+    elif isinstance(expr, str):
+        return df.with_columns(pl.when(pl.col(expr)).then(pl.lit(True)).otherwise(pl.lit(False)).alias(mark_col))
+    elif isinstance(expr, bool):
+        return df.with_columns(pl.lit(expr).alias(mark_col))
+    else:
+        raise ValueError(f"Invalid expression type: {type(expr)}")
+
+
 def write_df_to_parquet_or_tsv(
     df: pl.DataFrame,
     path: Union[str, Path],
@@ -275,6 +411,11 @@ class DFFilterConfig(AbstractDFManiConfig):
 
 
 @dataclass
+class DFDropColConfig(AbstractDFManiConfig):
+    cols: Union[str, Sequence[str]]
+
+
+@dataclass
 class DFConcatConfig(AbstractDFManiConfig):
     how: Literal["vertical", "horizontal"] = "vertical"
 
@@ -306,10 +447,12 @@ def do_df_mani(
         elif isinstance(conf, DFFilterConfig):
             if conf.condition is not None:
                 df = df.filter(conf.condition)
-        elif isinstance(conf, DFColRenameConfig):
-            df = df.rename(conf.rename_dict)
+        elif isinstance(conf, DFDropColConfig):
+            df = df.drop(conf.cols)
         elif isinstance(conf, DFConcatConfig):
             df = pl.concat(df, how=conf.how)
+        elif isinstance(conf, DFColRenameConfig):
+            df = df.rename(conf.rename_dict)
         elif isinstance(conf, DFAddLitColConfig):
             df = df.with_columns(pl.lit(conf.value).alias(conf.col_name))
         else:

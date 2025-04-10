@@ -30,7 +30,7 @@ from ..stats import (
 )
 from ..utils import (
     _T_InputOrAll,
-    flatten_nested_list,
+    flatten_list,
     gather_value_or_all,
     lookup_dict_with_tuple_key,
     read_df_from_parquet_or_tsv,
@@ -680,14 +680,14 @@ class EntryQuantificationReport(AbstractQuantificationReport):
     def attach_annotation_via_entry(
         self,
         annotation_cols: Union[str, Sequence[str]],
-        persistent: bool = False,
         annotation_attach_method: Literal["leftjoin", "agg_leftjoin"] = "leftjoin",
+        persist: bool = False,
     ) -> pl.DataFrame:
         """
         Attach annotation columns to the quantification dataframe from the main report by using entry as key.
         Will return a new dataframe with the annotation columns attached.
         This equals to left-join the quantification dataframe and the selected columns in main report on the entry column.
-        If `persistent` is True, the dataframe stored in the object will also be updated, else only return a new dataframe with expected columns.
+        If `persist` is True, the dataframe stored in the object will also be updated, else only return a new dataframe with expected columns.
         """
         if self._main_report is None:
             raise ValueError("To attach annotation via entry, the main report should be provided.")
@@ -700,7 +700,7 @@ class EntryQuantificationReport(AbstractQuantificationReport):
             on=self.entry_level,
             method=annotation_attach_method,
         )
-        if persistent:
+        if persist:
             self.df = df
         return df
 
@@ -731,7 +731,7 @@ class EntryQuantificationReport(AbstractQuantificationReport):
 
         """
         conds = gather_value_or_all(cond, list(self.exp_layout.all_conditions))
-        runs = flatten_nested_list([self.exp_layout.condition_to_runs_map[c] for c in conds])
+        runs = flatten_list([self.exp_layout.condition_to_runs_map[c] for c in conds])
 
         kept_cols = [self.entry_level] if keep_entry_col else []
         if keep_other_cols:
@@ -786,6 +786,7 @@ class EntryQuantificationReport(AbstractQuantificationReport):
         min_reps: int = 3,
         temp_reverse_log_scale: Optional[int] = 2,
         new_colname_pattern: str = "{cond}_cv_{min_reps}reps",
+        persist: bool = True,
     ) -> pl.DataFrame:
         """
         Calculate the coefficient of variation (cv) for each condition and attach the result to the dataframe.
@@ -810,7 +811,7 @@ class EntryQuantificationReport(AbstractQuantificationReport):
         pl.DataFrame
             The dataframe with cv columns attached.
         """
-        self.df = calc_cv_on_df(
+        df = calc_cv_on_df(
             self.df,
             cond_to_cols_map=self.exp_layout.condition_to_runs_map,
             cond=cond,
@@ -818,12 +819,15 @@ class EntryQuantificationReport(AbstractQuantificationReport):
             temp_reverse_log_scale=temp_reverse_log_scale,
             new_colname_pattern=new_colname_pattern,
         )
-        return self.df
+        if persist:
+            self.df = df
+        return df
 
     def count_detected_replicates(
         self,
         cond="all",
         new_colname_pattern: str = "{cond}_detected_reps",
+        persist: bool = True,
     ) -> pl.DataFrame:
         """
         Count the number of detected replicates for defined conditions and attach the results to the dataframe.
@@ -841,14 +845,16 @@ class EntryQuantificationReport(AbstractQuantificationReport):
             The quantification dataframe.
         """
         cond = gather_value_or_all(cond, list(self.cond_to_run_map.keys()))
-        self.df = self.df.with_columns(
+        df = self.df.with_columns(
             pl.lit(
                 count_df_selected_cols_nonnan(self.df, cols=self.cond_to_run_map[c], count_col=None),
                 dtype=pl.Int8,
             ).alias(new_colname_pattern.format(cond=c))
             for c in cond
         )
-        return self.df
+        if persist:
+            self.df = df
+        return df
 
     def count_detections_below_cv(
         self,
@@ -901,6 +907,7 @@ class EntryQuantificationReport(AbstractQuantificationReport):
         div_method: Literal["agg_and_divide", "divide_and_agg"] = "agg_and_divide",
         agg_method: Literal["mean", "median", "absmax", "absmin", "interquartile_mean"] = "mean",
         new_colname_pattern: str = "ratio_{cond1}_to_{cond2}",
+        persist: bool = True,
     ) -> pl.DataFrame:
         """
         Calculate the ratio of quantity values between two conditions and attach the results to the dataframe.
@@ -931,7 +938,7 @@ class EntryQuantificationReport(AbstractQuantificationReport):
         pl.DataFrame
             The quantification dataframe.
         """
-        self.df = calc_ratio_on_df(
+        df = calc_ratio_on_df(
             self.df,
             cond_to_cols_map=self.exp_layout.condition_to_runs_map,
             base_cond=base_cond,
@@ -942,7 +949,9 @@ class EntryQuantificationReport(AbstractQuantificationReport):
             agg_method=agg_method,
             new_colname_pattern=new_colname_pattern,
         )
-        return self.df
+        if persist:
+            self.df = df
+        return df
 
     def get_cond_quants(
         self,

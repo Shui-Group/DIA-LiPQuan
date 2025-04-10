@@ -508,6 +508,7 @@ def attach_annotation_from_other_df(
     annotation_cols: Union[str, Sequence[str]],
     on: Union[str, Sequence[str]],
     pre_filter: Optional[pl.Expr] = None,
+    unique_on_key_only: bool = False,
     method: Literal["leftjoin", "agg_leftjoin"] = "leftjoin",
     check_unique: bool = True,
     concat_char: str = ";",
@@ -542,6 +543,9 @@ def attach_annotation_from_other_df(
         filter out the restricted cut sites, as `(~pl.col(cut_site_is_restricted))`, else we will make each row
         duplicated because actually each precursor can map to two cut sites, in which only one or zero site is
         non-restricted.
+    unique_on_key_only : bool, optional
+        For the `other_df`, whether to do unique on the join key (`on`) only, by default False
+        When False, the `other_df` will be unique on `(on, *annotation_cols)`
     method : Literal["leftjoin", "agg_leftjoin"], optional
         Join method to use:
         - "leftjoin" (default): Direct left join with unique values,
@@ -572,7 +576,10 @@ def attach_annotation_from_other_df(
 
     if pre_filter is not None:
         other_df = other_df.filter(pre_filter)
-    other_df = other_df.select([*on, *join_cols]).unique()
+    if unique_on_key_only:
+        other_df = other_df.select([*on, *join_cols]).unique(on)
+    else:
+        other_df = other_df.select([*on, *join_cols]).unique()
 
     if method == "leftjoin":
         # Simple left join with unique values

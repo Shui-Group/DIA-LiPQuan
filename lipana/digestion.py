@@ -5,7 +5,7 @@ from typing import Iterable, Literal, Union
 import numpy as np
 from numba import njit
 
-from .utils import flatten_nested_list
+from .utils import flatten_list
 
 __all__ = [
     "TED",
@@ -250,9 +250,7 @@ Extend n: {self.extend_n}"""
     def _generate_pedestal_sites(self, seq, in_seq_len):
         # Find cleavage sites of the restricted enzyme as pedestals
         pedestal_sites = np.array(
-            flatten_nested_list(
-                [[_.end() for _ in re.finditer(rule, seq)] for rule in self.restricted_digestion_rules]
-            ),
+            flatten_list([[_.end() for _ in re.finditer(rule, seq)] for rule in self.restricted_digestion_rules]),
             dtype=np.int32,
         )
         pos1_mc_offset = False

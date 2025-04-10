@@ -74,6 +74,12 @@ avail_comp_pairs <- Filter(function(pair) all(pair %in% avail_conditions), comp_
 message(sprintf("All defined comparison pairs: %s", comp_pairs))
 message(sprintf("Available comparison pairs: %s", avail_comp_pairs))
 
+if ("mv_check_passed" %in% colnames(indata)) {
+    mv_check_passed <- as.logical(indata$mv_check_passed)
+} else {
+    mv_check_passed <- rep(TRUE, nrow(indata))
+}
+
 output <- list()
 for (pair in avail_comp_pairs) {
     cond1 <- pair[1]
@@ -90,10 +96,13 @@ for (pair in avail_comp_pairs) {
     )
     rownames(design) <- all_runs
 
-    sub_indata <- indata[
-        rowSums(!is.na(indata[cond1_runs])) >= 2 & rowSums(!is.na(indata[cond2_runs])) >= 2, 
-        c(all_runs, entry_col)
-    ]
+    # sub_indata <- indata[
+    #     rowSums(!is.na(indata[cond1_runs])) >= 2 & rowSums(!is.na(indata[cond2_runs])) >= 2, 
+    #     c(all_runs, entry_col)
+    # ]
+    sub_indata <- indata[mv_check_passed, c(all_runs, entry_col)]
+    ignored_entries <- indata[!mv_check_passed, entry_col]
+
     if (nrow(sub_indata) == 0) {
         message("No row left after requiring at least 2 detections for each condition. Skip this pair.")
         next
@@ -108,11 +117,19 @@ for (pair in avail_comp_pairs) {
     stats_table <- limma::topTable(
         fit,
         coef = 2,
-        number = nrow(fit),
+        number = Inf,
         genelist = sub_indata[[entry_col]],
         adjust.method = "BH",
         p.value = 1
     )
+
+    if (length(ignored_entries) > 0) {
+        ignored_entry_table <- setNames(data.frame(ignored_entries, stringsAsFactors = FALSE), "ID")
+        for (col in setdiff(names(stats_table), "ID")) {
+            ignored_entry_table[[col]] <- NA
+        }
+        stats_table <- rbind(stats_table, ignored_entry_table)
+    }
 
     if (nrow(stats_table) > 0) {
         stats_table["pair"] <- sprintf("%s_vs_%s", cond1, cond2)

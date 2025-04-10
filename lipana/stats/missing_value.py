@@ -1,7 +1,7 @@
 import copy
 import logging
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional, Sequence, Union
+from typing import Any, Iterable, Literal, Optional, Sequence, Union
 
 import numpy as np
 import polars as pl
@@ -26,6 +26,9 @@ __all__ = [
     "SequentialImputeMissingValueHandler",
     "do_pairwise_missing_value_handling",
     "do_group_missing_value_handling",
+    "check_paired_mv",
+    "CheckRemovalMissingValueHandler",
+    "check_mv_on_df",
     "do_pairwise_missing_value_handling_on_df",
     "do_group_missing_value_handling_on_df",
 ]
@@ -78,17 +81,18 @@ def _check_and_fill_full_empty(
     a2: np.ndarray,
     a1_enough_rep: int = 3,
     a2_enough_rep: int = 3,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, bool]:
     """Check and fill fully-empty rows based on non-NaN counts."""
     a1_nonnan_count = (~np.isnan(a1)).sum()
     a2_nonnan_count = (~np.isnan(a2)).sum()
+    is_filled = False
     if (a1_nonnan_count >= a1_enough_rep) and (a2_nonnan_count == 0):
         a2[:a1_nonnan_count] = 0.0
+        is_filled = True
     elif (a1_nonnan_count == 0) and (a2_nonnan_count >= a2_enough_rep):
         a1[:a2_nonnan_count] = 0.0
-    else:
-        pass
-    return a1, a2
+        is_filled = True
+    return a1, a2, is_filled
 
 
 @njit
@@ -98,7 +102,7 @@ def fill_full_empty(
     a1_enough_rep: int = 3,
     a2_enough_rep: int = 3,
     do_copy: bool = False,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Fill fully-empty array in an array pair if its paired array has enough non-NA values.
     `mat1` and `mat2` should have shape as (n, _), where `_` means the number of samples can be different in two matrices.
@@ -111,14 +115,15 @@ def fill_full_empty(
     if do_copy:
         mat1 = mat1.copy()
         mat2 = mat2.copy()
+    is_filled = np.zeros(mat1.shape[0], dtype=np.bool_)
     for i in prange(mat1.shape[0]):
-        mat1[i], mat2[i] = _check_and_fill_full_empty(
+        mat1[i], mat2[i], is_filled[i] = _check_and_fill_full_empty(
             mat1[i],
             mat2[i],
             a1_enough_rep,
             a2_enough_rep,
         )
-    return mat1, mat2
+    return mat1, mat2, is_filled
 
 
 @dataclass
@@ -136,7 +141,9 @@ class FullEmptyFillingMissingValueHandler(AbstractPairwiseMissingValueHandler):
 
     def __post_init__(self):
         self.min_exp_rep_count, self.min_ctrl_rep_count = _initialize_paired_values(
-            self.min_exp_rep_count, self.min_ctrl_rep_count, self.min_rep_count
+            self.min_exp_rep_count,
+            self.min_ctrl_rep_count,
+            self.min_rep_count,
         )
 
 
@@ -149,10 +156,11 @@ def _check_and_sample_normal_dist(
     a1_impute_rep_range: tuple[int, int] = (1, 2),
     a2_impute_rep_range: tuple[int, int] = (1, 2),
     log_scale_minmax_diff: int = 1,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, bool]:
     """Check and sample from a normal distribution to fill missing values in one array based on the other array."""
     a1_nonnan_count = (~np.isnan(a1)).sum()
     a2_nonnan_count = (~np.isnan(a2)).sum()
+    is_filled = False
     if (
         (a1_nonnan_count >= a1_enough_rep)
         and (a2_nonnan_count <= a2_impute_rep_range[1])
@@ -161,6 +169,7 @@ def _check_and_sample_normal_dist(
     ):
         _n = a1_nonnan_count - a2_nonnan_count
         a2[np.where(np.isnan(a2))[0][:_n]] = np.clip(np.random.normal(np.nanmean(a2), np.nanstd(a1), _n), 1e-4, None)
+        is_filled = True
     elif (
         (a2_nonnan_count >= a2_enough_rep)
         and (a1_nonnan_count <= a1_impute_rep_range[1])
@@ -169,7 +178,8 @@ def _check_and_sample_normal_dist(
     ):
         _n = a2_nonnan_count - a1_nonnan_count
         a1[np.where(np.isnan(a1))[0][:_n]] = np.clip(np.random.normal(np.nanmean(a1), np.nanstd(a2), _n), 1e-4, None)
-    return a1, a2
+        is_filled = True
+    return a1, a2, is_filled
 
 
 @njit
@@ -182,7 +192,7 @@ def sample_normal_dist(
     a2_impute_rep_range: tuple[int, int] = (1, 2),
     log_scale_minmax_diff: int = 1,
     do_copy: bool = False,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Sample from a normal distribution to fill missing values in one array based on the other array.
     `mat1` and `mat2` should have shape as (n, _), where `_` means the number of samples can be different in two matrices.
@@ -198,8 +208,9 @@ def sample_normal_dist(
     if do_copy:
         mat1 = mat1.copy()
         mat2 = mat2.copy()
+    is_filled = np.zeros(mat1.shape[0], dtype=np.bool_)
     for i in prange(mat1.shape[0]):
-        mat1[i], mat2[i] = _check_and_sample_normal_dist(
+        mat1[i], mat2[i], is_filled[i] = _check_and_sample_normal_dist(
             mat1[i],
             mat2[i],
             a1_enough_rep,
@@ -208,7 +219,7 @@ def sample_normal_dist(
             a2_impute_rep_range,
             log_scale_minmax_diff,
         )
-    return mat1, mat2
+    return mat1, mat2, is_filled
 
 
 @dataclass
@@ -230,7 +241,9 @@ class NormalDistSamplingMissingValueHandler(AbstractPairwiseMissingValueHandler)
 
     def __post_init__(self):
         self.min_exp_rep_count, self.min_ctrl_rep_count = _initialize_paired_values(
-            self.min_exp_rep_count, self.min_ctrl_rep_count, self.min_rep_count
+            self.min_exp_rep_count,
+            self.min_ctrl_rep_count,
+            self.min_rep_count,
         )
         self.do_imputation_for_exp_rep_range, self.do_imputation_for_ctrl_rep_range = _initialize_paired_values(
             self.do_imputation_for_exp_rep_range,
@@ -262,12 +275,14 @@ def sequential_impute(
     row_nan_count = np.sum(nan_mat, axis=1)
 
     if row_nan_count.sum() == 0:
-        return mat, False
+        return mat, np.zeros(mat.shape[0], dtype=np.bool_)
 
     fullfill_row_idx = np.where(row_nan_count == 0)[0]
     n_fullfill = len(fullfill_row_idx)
 
     row_to_impute_indices = np.where((row_nan_count > 0) & (row_nan_count <= max_nan_for_impute))[0]
+    is_filled = np.zeros(mat.shape[0], dtype=np.bool_)
+    is_filled[row_to_impute_indices] = True
 
     # Sort the index of rows to impute by increased nan number
     row_to_impute_indices = row_to_impute_indices[np.argsort(row_nan_count[row_to_impute_indices], kind="stable")]
@@ -292,7 +307,7 @@ def sequential_impute(
         fullfill_row_idx = np.hstack((fullfill_row_idx, impute_row_idx))
         fullfill_subx = mat[fullfill_row_idx]
 
-    return np.asarray(mat, order=_mat_raw_order), True
+    return np.asarray(mat, order=_mat_raw_order), is_filled
 
 
 @dataclass
@@ -310,9 +325,9 @@ class SequentialImputeMissingValueHandler(AbstractGroupMissingValueHandler):
 def do_pairwise_missing_value_handling(
     exp_quant_arr: np.ndarray,
     ctrl_quant_arr: np.ndarray,
-    config: Optional[Union[AbstractPairwiseMissingValueHandler, Sequence[AbstractPairwiseMissingValueHandler]]] = None,
+    config: Union[AbstractPairwiseMissingValueHandler, Sequence[AbstractPairwiseMissingValueHandler]],
     do_copy: bool = False,
-):
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Handle missing values in two arrays based on the provided configurations.
     Configurations can be a single instance or a list of instances of objects that inherit from `AbstractPairwiseMissingValueHandler`.
@@ -321,19 +336,22 @@ def do_pairwise_missing_value_handling(
         config = NullMissingValueHandler()
     if not isinstance(config, Iterable):
         config = (config,)
+    fill_types = np.full(exp_quant_arr.shape[0], "", dtype="<U20")
     for conf in config:
         if isinstance(conf, NullMissingValueHandler):
             pass
         elif isinstance(conf, FullEmptyFillingMissingValueHandler):
-            exp_quant_arr, ctrl_quant_arr = fill_full_empty(
+            exp_quant_arr, ctrl_quant_arr, is_filled = fill_full_empty(
                 exp_quant_arr,
                 ctrl_quant_arr,
                 conf.min_exp_rep_count,
                 conf.min_ctrl_rep_count,
                 do_copy,
             )
+            _idxs = np.where(is_filled)[0]
+            fill_types[_idxs] = np.char.add(fill_types[_idxs], "full_empty")
         elif isinstance(conf, NormalDistSamplingMissingValueHandler):
-            exp_quant_arr, ctrl_quant_arr = sample_normal_dist(
+            exp_quant_arr, ctrl_quant_arr, is_filled = sample_normal_dist(
                 exp_quant_arr,
                 ctrl_quant_arr,
                 conf.min_exp_rep_count,
@@ -343,15 +361,17 @@ def do_pairwise_missing_value_handling(
                 conf.log_scale_minmax_diff,
                 do_copy,
             )
+            _idxs = np.where(is_filled)[0]
+            fill_types[_idxs] = np.char.add(fill_types[_idxs], "sample_norm")
         else:
             raise ValueError(f"Unsupported configuration type: {type(conf)}")
-    return exp_quant_arr, ctrl_quant_arr
+    return exp_quant_arr, ctrl_quant_arr, fill_types
 
 
 def do_group_missing_value_handling(
     mat: np.ndarray,
     config: Optional[Union[AbstractGroupMissingValueHandler, Sequence[AbstractGroupMissingValueHandler]]] = None,
-):
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Handle missing values in a group of arrays based on the provided configurations.
     """
@@ -359,14 +379,71 @@ def do_group_missing_value_handling(
         config = NullMissingValueHandler()
     if isinstance(config, AbstractGroupMissingValueHandler):
         config = (config,)
+    fill_types = np.full(mat.shape[0], "", dtype="<U20")
     for conf in config:
         if isinstance(conf, NullMissingValueHandler):
             pass
         elif isinstance(conf, SequentialImputeMissingValueHandler):
-            mat, _ = sequential_impute(mat, conf.min_required_detections, conf.copy_input)
+            mat, is_filled = sequential_impute(mat, conf.min_required_detections, conf.copy_input)
+            _idxs = np.where(is_filled)[0]
+            fill_types[_idxs] = np.char.add(fill_types[_idxs], "seq_imp")
         else:
             raise ValueError(f"Unsupported configuration type: {type(conf)}")
-    return mat
+    return mat, fill_types
+
+
+def check_paired_mv(
+    mat1: np.ndarray,
+    mat2: np.ndarray,
+    a1_enough_rep: int = 3,
+    a2_enough_rep: int = 3,
+) -> np.ndarray:
+    return np.logical_and(
+        (~np.isnan(mat1)).sum(axis=1) >= a1_enough_rep,
+        (~np.isnan(mat2)).sum(axis=1) >= a2_enough_rep,
+    )
+
+
+@dataclass
+class CheckRemovalMissingValueHandler(AbstractPairwiseMissingValueHandler):
+    """
+    Configuration that will call `fill_full_empty` in `do_pairwise_missing_value_handling`.
+    """
+
+    min_rep_count: Optional[int] = 3
+    annotation_col: str = "mv_check_passed"
+    remove_not_passed: bool = False
+
+    min_exp_rep_count: Optional[int] = None
+    min_ctrl_rep_count: Optional[int] = None
+
+    _compare_scope: _T_CompareScope = "pairwise"
+
+    def __post_init__(self):
+        self.min_exp_rep_count, self.min_ctrl_rep_count = _initialize_paired_values(
+            self.min_exp_rep_count,
+            self.min_ctrl_rep_count,
+            self.min_rep_count,
+        )
+
+
+def check_mv_on_df(
+    df: pl.DataFrame,
+    exp_runs: Sequence[str],
+    ctrl_runs: Sequence[str],
+    mv_filter_config: CheckRemovalMissingValueHandler,
+) -> pl.DataFrame:
+    checks = check_paired_mv(
+        df.select(exp_runs).to_numpy(),
+        df.select(ctrl_runs).to_numpy(),
+        mv_filter_config.min_exp_rep_count,
+        mv_filter_config.min_ctrl_rep_count,
+    )
+    if mv_filter_config.annotation_col is not None:
+        df = df.with_columns(pl.lit(checks, dtype=pl.Boolean).alias(mv_filter_config.annotation_col))
+    if mv_filter_config.remove_not_passed:
+        df = df.filter(~checks)
+    return df
 
 
 def do_pairwise_missing_value_handling_on_df(
@@ -374,47 +451,42 @@ def do_pairwise_missing_value_handling_on_df(
     exp_runs: Sequence[str],
     ctrl_runs: Sequence[str],
     config: Optional[Union[AbstractPairwiseMissingValueHandler, Sequence[AbstractPairwiseMissingValueHandler]]] = None,
-    filter_less_than_rep: Optional[Union[int, tuple[int, int]]] = None,
-    attach_back: bool = False,
+    mv_filter_config: Optional[CheckRemovalMissingValueHandler] = None,
+    attach_back: Union[Literal["none", "drop_raw"], str] = "drop_raw",
     annotation_col: Optional[Union[str, Sequence[str]]] = cm.precursor,
 ):
     """
     Handle missing values of two conditions in a dataframe.
     This function can generally be used for pairwise missing value handling methods, because once two conditions are modified at the same time, they can not be used in next iteration.
 
-    By default, the output will have columns [*exp_runs, *ctrl_runs, *annotation_col].
-    Set `attach_back` to True to have a dataframe with all the original columns (`exp_runs` and `ctrl_runs` are imputed) and "_raw" suffix added to the columns of `exp_runs` and `ctrl_runs`.
+    The output is a dataframe and the columns in it depend on the `attach_back` parameter.
+    - When set to "none", the output will have columns [*exp_runs, *ctrl_runs, *annotation_col, "missing_fill_type"], which means the new dataframe only has new quantity columns, "missing_fill_type", and those defined in `annotation_col`.
+    - By default, `attach_back` is "drop_raw", and the output will have columns [*all_columns_in_input_df, "missing_fill_type"], where the quantity columns are new ones and the original ones are dropped.
+    - Set to a string is similar as "drop_raw", but the original columns are not dropped and renamed with `attach_back` added as a suffix.
     """
-    result = pl.from_numpy(
-        np.hstack(
-            (
-                do_pairwise_missing_value_handling(
-                    df.select(exp_runs).to_numpy(),
-                    df.select(ctrl_runs).to_numpy(),
-                    config=config,
-                    do_copy=True,
-                )
-            )
-        ),
-        [*exp_runs, *ctrl_runs],
+    exp_result, ctrl_result, fill_types = do_pairwise_missing_value_handling(
+        df.select(exp_runs).to_numpy(),
+        df.select(ctrl_runs).to_numpy(),
+        config=config,
+        do_copy=True,
     )
 
-    if attach_back:
-        df = df.rename({r: f"{r}_raw" for r in [*exp_runs, *ctrl_runs]}).with_columns(result)
-    else:
-        df = result.with_columns(df.select(annotation_col))
-    if filter_less_than_rep is None:
+    result = pl.from_numpy(
+        np.hstack((exp_result, ctrl_result)),
+        [*exp_runs, *ctrl_runs],
+    ).with_columns(pl.lit(fill_types, dtype=pl.Utf8).alias("missing_fill_type"))
+
+    match attach_back:
+        case "none":
+            df = result.with_columns(df.select(annotation_col))
+        case "drop_raw":
+            df = df.drop([*exp_runs, *ctrl_runs]).with_columns(result)
+        case _:
+            df = df.rename({r: f"{r}{attach_back}" for r in [*exp_runs, *ctrl_runs]}).with_columns(result)
+
+    if mv_filter_config is None:
         return df
-    if isinstance(filter_less_than_rep, int):
-        filter_less_than_rep = (filter_less_than_rep, filter_less_than_rep)
-    return df.filter(
-        np.logical_and(
-            *(
-                count_df_selected_cols_nonnan(df, cols, count_col=None) >= filter_less_than_rep[idx]
-                for idx, cols in enumerate((exp_runs, ctrl_runs))
-            )
-        )
-    )
+    return check_mv_on_df(df, exp_runs, ctrl_runs, mv_filter_config)
 
 
 def do_group_missing_value_handling_on_df(
@@ -429,13 +501,12 @@ def do_group_missing_value_handling_on_df(
 
     Set `raw_values_suffix` to a string to have the original values in the input dataframe attached as a new column with the string added to the original column names.
     """
-    result = pl.from_numpy(
-        do_group_missing_value_handling(df.select(runs).to_numpy(order="c"), config),
-        runs,
-    )
+    mat, fill_types = do_group_missing_value_handling(df.select(runs).to_numpy(order="c"), config)
+    result = pl.from_numpy(mat, runs).with_columns(pl.lit(fill_types, dtype=pl.Utf8).alias("missing_fill_type"))
 
-    if raw_values_suffix is None:
-        df = df.drop(runs)
-    else:
-        df = df.rename({r: f"{r}{raw_values_suffix}" for r in runs})
+    match raw_values_suffix:
+        case None:
+            df = df.drop(runs)
+        case _:
+            df = df.rename({r: f"{r}{raw_values_suffix}" for r in runs})
     return pl.concat([df, result], how="horizontal")
