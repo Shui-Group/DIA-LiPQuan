@@ -1031,7 +1031,9 @@ def agg_values_in_group(
         .alias(new_col_name[idx])
         for idx, (_col, _func) in enumerate(zip(agg_col, agg_func, strict=True))
     )
-    df = df.with_columns(pl.col(new_col_name[0]).map_batches(_mark_first_nonnan_as_true).alias(mark_col))
+    df = df.with_columns(
+        pl.col(new_col_name[0]).map_batches(_mark_first_nonnan_as_true).over(group_col).alias(mark_col)
+    )
 
     return df
 

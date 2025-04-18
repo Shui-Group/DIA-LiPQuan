@@ -1037,21 +1037,6 @@ class EntryQuantificationReport(AbstractQuantificationReport):
 
 
 class EntryStatsReport(AbstractStatsReport):
-    """
-    #>    ProteinName       PeptideSequence                 FULL_PEPTIDE        Label
-    #> 1:      P14164               ILQNDLK               P14164_ILQNDLK Ctrl vs Osmo
-    #> 2:      P16622 SHLQSNQLYSNQLPLDFALGK P16622_SHLQSNQLYSNQLPLDFALGK Ctrl vs Osmo
-    #>        log2FC          SE      Tvalue DF      pvalue adj.pvalue issue
-    #> 1:  1.0601391 0.219397767   4.8320413  4 0.008448744 0.03942747    NA
-    #> 2:  0.1655540 0.277961791   0.5955998  3 0.593383886 0.71358286    NA
-    #>    MissingPercentage ImputationPercentage fully_TRI NSEMI_TRI CSEMI_TRI
-    #> 1:         0.0000000                    0      TRUE     FALSE     FALSE
-    #> 2:         0.1666667                    0      TRUE     FALSE     FALSE
-    #>    CTERMINUS NTERMINUS StartPos EndPos
-    #> 1:     FALSE     FALSE      358    365
-    #> 2:     FALSE     FALSE      354    375
-    """
-
     def __init__(
         self,
         df: pl.DataFrame,

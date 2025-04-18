@@ -1,7 +1,7 @@
 import itertools
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Literal, Optional, Sequence, Union
+from typing import Callable, Iterable, Literal, Optional, Sequence, Union
 
 import numpy as np
 import polars as pl

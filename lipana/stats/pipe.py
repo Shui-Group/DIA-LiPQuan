@@ -1,8 +1,10 @@
+import collections.abc
 import functools
 import logging
 import re
+from dataclasses import dataclass
 from functools import partial
-from typing import Callable, Literal, Optional, Sequence, Union
+from typing import Callable, Literal, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import polars as pl
@@ -48,6 +50,8 @@ from .stats_base import (
 __all__ = [
     "do_stats_pipe_direct",
     "do_stats_pipe_agg",
+    "SignificantRule",
+    "do_significant_selection",
 ]
 
 logger = logging.getLogger("lipana")
@@ -257,6 +261,34 @@ def do_stats_pipe_agg(
         Literal["sel_min_p", "sel_min_p_direction_check", "combine_p", "combine_p_direction_check"],
     ] = "sel_min_p",
 ):
+    """
+    Aggregate the stats from the base entry to the target entry.
+
+    This function uses the `pipeline` parameter to control how results are aggregated from a base level (e.g., peptides) to a target level (e.g., proteins or cut sites). Specify one of the following options for the `pipeline` parameter:
+    - `"sel_min_p"`: Selects the single base-level entry with the minimum p-value for each target-level entry.
+    - `"sel_min2_p"`, `"sel_min3_p"`, ...: Selects the top 2, 3, etc., base-level entries with the lowest p-values for each target-level entry.
+    - `"combine_p"`: Combines p-values from all associated base-level entries for each target-level entry using Fisher's method. The reported fold change (FC) will be the median FC of the combined base-level entries.
+    - Any pipeline can be followed by `_direction_check` to first assess the directionality (sign of the t-statistic in the predefined pipelines) of fold changes for all base entries mapping to a target entry. They determine if there's a majority direction (positive or negative). Only the base entries matching this majority direction are considered for the subsequent selection or combination step.
+
+    Parameters
+    ----------
+    qdf: pl.DataFrame
+        The stats dataframe.
+    base_entry: str
+        The base entry.
+    target_entry: str
+        The target entry.
+    group_entry: Optional[str]
+        The group entry.
+        Here the group entry is the entry that will be used to group the stats.
+        The column "pair" is always appended to the group key if needed, and here no need to explicitly provide it.
+    annotation_df: Optional[pl.DataFrame]
+        The annotation dataframe.
+    annotation_cols: Optional[Union[str, Sequence[str]]]
+        The annotation columns.
+    pipeline: Union[str, Literal["sel_min_p", "sel_min_p_direction_check", "combine_p", "combine_p_direction_check"]]
+        The pipeline to be used.
+    """
     sel_min_k = None
     if pipeline == "combine_p":
         direction_check = False
@@ -273,6 +305,8 @@ def do_stats_pipe_agg(
         raise ValueError(f"Invalid pipeline: {pipeline}")
 
     if annotation_cols is not None:
+        if annotation_df is None:
+            raise ValueError("`annotation_df` is required when `annotation_cols` is provided.")
         qdf = attach_annotation_from_other_df(
             qdf,
             annotation_df,
@@ -332,17 +366,17 @@ def do_stats_pipe_agg(
         FDRConfig(
             group="pair",
             p_col=used_p_col,
-            new_col_name="adj_pvalue_combined_exp_wise",
+            new_col_name=f"adj_{used_p_col}_exp_wise",
             method="BH",
             filter_condition=filter_expr,
         )
     )
-    if group_entry is not None:
+    if (group_entry is not None) and (group_entry != target_entry):
         configs.append(
             FDRConfig(
                 group=("pair", group_entry),
                 p_col=used_p_col,
-                new_col_name="adj_pvalue_combined_group_wise",
+                new_col_name=f"adj_{used_p_col}_group_wise",
                 method="BH",
                 filter_condition=filter_expr,
             )
@@ -351,6 +385,205 @@ def do_stats_pipe_agg(
         qdf,
         config=configs,
     )
+
+
+_T_cond = Tuple[str, Union[float, int]]
+
+
+def _wrap_condition(
+    conditions: Optional[Union[Sequence[_T_cond], _T_cond]] = None,
+) -> Optional[Sequence[_T_cond]]:
+    """
+    Validates and normalizes input conditions to Optional[Sequence[Tuple[str, Union[float, int]]]].
+
+    Ensures the input is either:
+    - None
+    - A single tuple (str, float | int) -> returns a Sequence containing that tuple.
+    - A non-empty sequence of (str, float | int) tuples -> returns the sequence.
+
+    Raises ValueError for invalid inputs.
+    """
+    _error_msg = (
+        "Input `conditions` must be None, a single tuple (str, float | int), "
+        "or a non-empty sequence of such tuples. Got: {} (Type: {})"
+    )
+
+    if conditions is None:
+        return None
+
+    # Check for single tuple (str, float | int)
+    # Check isinstance(conditions, tuple) *before* Sequence, as tuple is a Sequence.
+    if isinstance(conditions, tuple):
+        # Check if it's a tuple of length 2 with correct types, and *not* a tuple containing tuples
+        if len(conditions) == 2 and isinstance(conditions[0], str) and isinstance(conditions[1], (float, int)):
+            # It's a valid single (str, float|int) tuple
+            return (conditions,)
+        # If it's a tuple but not the format above, it might be a tuple of valid ConditionTuples,
+        # handled by the Sequence check below, or an invalid tuple format.
+
+    # Check for sequence of (str, float | int)
+    if isinstance(conditions, collections.abc.Sequence):
+        if not conditions:  # Handles empty list, tuple, etc.
+            return None
+
+        # Validate all items in the sequence
+        for item in conditions:
+            if not (
+                isinstance(item, tuple)
+                and len(item) == 2
+                and isinstance(item[0], str)
+                and isinstance(item[1], (float, int))
+            ):
+                # Found an invalid item in the sequence
+                raise ValueError(_error_msg.format(conditions, type(conditions)))
+
+        # If we reached here, all items are valid tuples
+        # Return the original sequence (preserves list/tuple type)
+        return conditions
+
+    # If it's none of the above valid types/formats
+    raise ValueError(_error_msg.format(conditions, type(conditions)))
+
+
+@dataclass
+class SignificantRule:
+    """
+    The rule for significant selection.
+
+    Parameters
+    ----------
+
+    greater_than: Optional[Sequence[tuple[str, float]]]
+        The conditions for greater than.
+    less_than: Optional[Sequence[tuple[str, float]]]
+        The conditions for less than.
+    gt_value_or_lt_negate: Optional[Sequence[tuple[str, float]]]
+        The conditions for greater than or less than.
+    less_than: Optional[Sequence[tuple[str, float]]] = (("adj_pvalue_exp_wise", 0.05),)
+    gt_value_or_lt_negate: Optional[Sequence[tuple[str, float]]] = (("log2_fc", 0.58496),)
+    filter_condition: Optional[pl.Expr] = None
+    """
+
+    greater_than: Optional[Sequence[tuple[str, float]]] = None
+    less_than: Optional[Sequence[tuple[str, float]]] = (("adj_pvalue_exp_wise", 0.05),)
+    gt_value_or_lt_negate: Optional[Sequence[tuple[str, float]]] = (("log2_fc", 0.58496),)
+    equal_to: Optional[Sequence[tuple[str, Union[float, str]]]] = None
+    filter_condition: Optional[pl.Expr] = None
+
+    def __post_init__(self):
+        self.greater_than = _wrap_condition(self.greater_than)
+        self.less_than = _wrap_condition(self.less_than)
+        self.gt_value_or_lt_negate = _wrap_condition(self.gt_value_or_lt_negate)
+        self.equal_to = _wrap_condition(self.equal_to)
+
+    def generate_expr(self, false_expr_if_empty: bool = False) -> pl.Expr:
+        conds = []
+
+        # Add greater_than conditions
+        if self.greater_than is not None:
+            for col, value in self.greater_than:
+                conds.append(pl.col(col).gt(value))
+
+        # Add less_than conditions
+        if self.less_than is not None:
+            for col, value in self.less_than:
+                conds.append(pl.col(col).lt(value))
+
+        # Add gt_value_or_lt_negate conditions
+        if self.gt_value_or_lt_negate is not None:
+            for col, value in self.gt_value_or_lt_negate:
+                conds.append((pl.col(col).gt(value) | pl.col(col).lt(-value)))
+
+        # Add equal_to conditions
+        if self.equal_to is not None:
+            for col, value in self.equal_to:
+                conds.append(pl.col(col).eq(value))
+
+        if len(conds) == 0:
+            if false_expr_if_empty:
+                return pl.lit(False)
+            else:
+                return None
+
+        # Combine the conditions with "and"
+        chained_cond = conds[0]
+        for c in conds[1:]:
+            chained_cond = chained_cond & c
+
+        # Add boolean return for checking
+        chained_cond = pl.when(chained_cond).then(pl.lit(True)).otherwise(pl.lit(False))
+        # Add filter condition if provided
+        if self.filter_condition is not None:
+            chained_cond = pl.when(self.filter_condition).then(chained_cond).otherwise(pl.lit(False))
+
+        return chained_cond
+
+
+def do_significant_selection(
+    df: pl.DataFrame,
+    rules: Sequence[SignificantRule],
+    requires_n_passed: int = 1,
+    target: Optional[Union[str, Sequence[str]]] = None,
+    mark_col: str = "significant",
+):
+    """
+    Do significant selection on the stats dataframe.
+    Within each rule, the conditions have an "and" relationship.
+    Many rules can be applied sequentially, and they have an "or" relationship.
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+        The stats dataframe.
+    rules : Sequence[SignificantRule]
+        The rules for significant selection.
+        See :class:`SignificantRule` for more details.
+    requires_n_passed: int
+        The number of passed base entries for a target to be significant.
+    target: Union[str, Sequence[str]]
+        The target column(s) to be the identifiers for significant selection.
+        For a general purpose usage, it can be None.
+        To select a target to be significant based on more than one base entry, `target` should be provided as the group key.
+        For example, `("protein_group", "pair")`.
+    mark_col: str
+        The column name of the mark for significant selection.
+        If the column does not exist, it will be created.
+        If `requires_n_passed` is not 1, an additional column will be created as `{mark_col}_{requires_n_passed}passed`.
+    """
+    if requires_n_passed > 1:
+        if target is None:
+            raise ValueError("`target` is required when `requires_n_passed` is not 1")
+
+    if isinstance(target, str):
+        target = [target]
+
+    if isinstance(rules, SignificantRule):
+        rules = [rules]
+
+    for rule in rules:
+        rule_expr = rule.generate_expr()
+        if rule_expr is None:
+            continue
+
+        # Prepare the mark_col if it doesn't exist
+        if mark_col not in df.columns:
+            df = df.with_columns(pl.lit(False).alias(mark_col))
+
+        # Update the significant column by OR'ing with this rule's mask
+        df = df.with_columns((pl.col(mark_col) | rule_expr).alias(mark_col))
+
+    # If requires_n_passed is not 1, do the final selection
+    if requires_n_passed != 1:
+        df = df.with_columns(
+            pl.col(mark_col)
+            .drop_nans()
+            .sum()
+            .over(target)
+            .ge(requires_n_passed)
+            .alias(f"{mark_col}_{requires_n_passed}passed")
+        )
+
+    return df
 
 
 def __do_stats_pipeline_pairwise(
@@ -365,6 +598,7 @@ def __do_stats_pipeline_pairwise(
     return_chains: bool = False,
 ):
     """
+    TODO add non-missing counts first as numerator-... and denominator-...
 
     This is a general entry point for pairwise comparison pipelines.
     Three pre-defined pipelines are supported:
