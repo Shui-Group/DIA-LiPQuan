@@ -459,15 +459,20 @@ class SignificantRule:
         The conditions for less than.
     gt_value_or_lt_negate: Optional[Sequence[tuple[str, float]]]
         The conditions for greater than or less than.
-    less_than: Optional[Sequence[tuple[str, float]]] = (("adj_pvalue_exp_wise", 0.05),)
-    gt_value_or_lt_negate: Optional[Sequence[tuple[str, float]]] = (("log2_fc", 0.58496),)
-    filter_condition: Optional[pl.Expr] = None
+    equal_to: Optional[Sequence[tuple[str, Union[float, str]]]]
+        The conditions for equal to.
+    expression_rule: Optional[pl.Expr]
+        The polars expression rule.
+        This rule also have the "and" relationship with the other conditions.
+    filter_condition: Optional[pl.Expr]
+        The filter condition.
     """
 
     greater_than: Optional[Sequence[tuple[str, float]]] = None
     less_than: Optional[Sequence[tuple[str, float]]] = (("adj_pvalue_exp_wise", 0.05),)
     gt_value_or_lt_negate: Optional[Sequence[tuple[str, float]]] = (("log2_fc", 0.58496),)
     equal_to: Optional[Sequence[tuple[str, Union[float, str]]]] = None
+    expression_rule: Optional[pl.Expr] = None
     filter_condition: Optional[pl.Expr] = None
 
     def __post_init__(self):
@@ -498,6 +503,13 @@ class SignificantRule:
         if self.equal_to is not None:
             for col, value in self.equal_to:
                 conds.append(pl.col(col).eq(value))
+
+        # Add expression_rule
+        if self.expression_rule is not None:
+            if isinstance(self.expression_rule, pl.Expr):
+                conds.append(self.expression_rule)
+            else:
+                raise ValueError("`expression_rule` must be a polars expression.")
 
         if len(conds) == 0:
             if false_expr_if_empty:
