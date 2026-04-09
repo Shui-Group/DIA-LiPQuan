@@ -12,11 +12,11 @@ You can install LiPAna directly via `pip`:
 
 ```bash
 pip install git+https://github.com/Shui-Group/DIA-LiPQuan.git
-
+```
 Or clone the repository and add it to your Python path
-
+```
 git clone https://github.com/Shui-Group/DIA-LiPQuan.git
-
+```
 import sys
 sys.path.append("/path/to/LiPAna")
 import lipana
