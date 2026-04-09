@@ -36,21 +36,7 @@ BiocManager::install("limma")
 ## Usages
 
 ### overview
-This page provides a general pipeline for analyzing Lipidomics (LiP) data using the lipana package.
-The example data used here is a truncated search report from DIA-NN. This dataset includes three experiment conditions, each with three replicates, and only 1000 proteins are retained.
+This web provides a general pipeline for analyzing Lipidomics (LiP) data using the DIA-LiPQuan package.
+useage page:http://10.19.26.62:9600/usage.html
 The example files are located in the "path_to/DIA-LiPQuan/example_data" directory.
-
-```
-import gzip
-import shutil
-from pathlib import Path
-
-workspace = Path(".").resolve().parents[1].joinpath("example_data")
-print("current workspace:", str(workspace))
-# Unzip gzipped files
-for file in workspace.glob("*.gz"):
-    with gzip.open(file, "rb") as f_in:
-        with open(file.with_suffix(""), "wb") as f_out:
-            shutil.copyfileobj(f_in, f_out)
-```
 
