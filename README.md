@@ -36,7 +36,7 @@ BiocManager::install("limma")
 ## Usages
 
 ### overview
-This web provides a general pipeline for analyzing DIA LiP data using the DIA-LiPQuan package.
-usage page:http://10.19.26.62:9600/usage.html
+This web provides a general pipeline for analyzing DIA LiP-MS data using the DIA-LiPQuan package.
+Usage page:http://10.19.26.62:9600/usage.html
 The example files are located in the "path_to/DIA-LiPQuan/example_data" directory.
 
