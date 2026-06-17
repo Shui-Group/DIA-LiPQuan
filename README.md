@@ -1,6 +1,6 @@
 # DIA-LiPQuan
 
-An informatics pipeline tailored to DIA LiP-MS quantification and downstream analysis.
+An informatics pipeline tailored to DIA LiP-MS quantification and downstream analysis. DIA-LiPQuan accepts precursor or peptide-level quantification outputs from DIA data search by DIA-NN or Spectronaut. 
 
 ---
 
